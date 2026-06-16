@@ -52,8 +52,11 @@ psutil==6.0.0
 # GPU Computing (requires CUDA)
 cupy-cuda12x==13.4.1
 
-# Blender
-bpy==4.0
+# Blender (bpy) — removed. PyPI dropped bpy<4.2 and bpy>=4.2 needs Python>=3.11,
+# so it is uninstallable on this py3.10 env. Only used by the save_glb=True OBJ->GLB
+# path; the app uses save_glb=False + create_glb_with_pbr_materials. Import is guarded
+# in hy3dpaint/DifferentiableRenderer/mesh_utils.py.
+# bpy==4.0
 
 # ONNX Runtime
 onnxruntime==1.16.3

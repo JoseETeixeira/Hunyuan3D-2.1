@@ -90,23 +90,19 @@ class Hunyuan3DPaintPipeline:
         print("Models Loaded.")
 
     @torch.no_grad()
-    def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True):
+    def __call__(self, mesh_path=None, image_path=None, output_mesh_path=None, use_remesh=True, save_glb=True, target_face_count=40000):
         """Generate texture for 3D mesh using multiview diffusion"""
-        # Ensure image_prompt is a list
-        if isinstance(image_path, str):
-            image_prompt = Image.open(image_path)
-        elif isinstance(image_path, Image.Image):
-            image_prompt = image_path
-        if not isinstance(image_prompt, List):
-            image_prompt = [image_prompt]
-        else:
-            image_prompt = image_path
+        # Ensure image_prompt is a list of PIL images. Supports multiple
+        # texture-reference images for the same mesh (single str/Image still works).
+        if isinstance(image_path, (str, Image.Image)):
+            image_path = [image_path]
+        image_prompt = [Image.open(p) if isinstance(p, str) else p for p in image_path]
 
         # Process mesh
         path = os.path.dirname(mesh_path)
         if use_remesh:
             processed_mesh_path = os.path.join(path, "white_mesh_remesh.obj")
-            remesh_mesh(mesh_path, processed_mesh_path)
+            remesh_mesh(mesh_path, processed_mesh_path, target_face_count)
         else:
             processed_mesh_path = mesh_path
 

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hunyuan3D Studio</title>
+  <link rel="stylesheet" href="/styles.css" />
+  <script type="module" src="https://unpkg.com/@google/model-viewer@3.5.0/dist/model-viewer.min.js"></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo">◈</span>
+      <div>
+        <h1>Hunyuan3D Studio</h1>
+        <p>Image → 3D shape → PBR texture</p>
+      </div>
+    </div>
+    <div id="health" class="health pill">checking…</div>
+  </header>
+
+  <main class="layout">
+    <!-- ── Controls ───────────────────────────── -->
+    <section class="panel controls">
+      <div id="retexBanner" class="banner" hidden>
+        <span id="retexText">Re-texturing model — upload a front image, set mode, then Generate Texture.</span>
+        <button id="retexCancel" type="button" class="banner-x" title="Cancel">×</button>
+      </div>
+      <div id="dropzone" class="dropzone">
+        <input id="file" type="file" accept="image/*" multiple hidden />
+        <div id="dropHint" class="drop-hint">
+          <span class="drop-icon">⬆</span>
+          <strong>Drop an image</strong>
+          <span>or click to browse</span>
+          <span class="drop-sub">one reference (front view works best)</span>
+        </div>
+      </div>
+      <div id="thumbs" class="thumbs" hidden></div>
+
+      <div class="field">
+        <label>Texture mode
+          <select id="texmode">
+            <option value="hunyuan">AI texture (Hunyuan PBR)</option>
+            <option value="projection">Projection — your photos</option>
+            <option value="gptproject">GPT texture — gpt-image-2 per view</option>
+            <option value="mvadapter">MV-Adapter SDXL</option>
+            <option value="mvgpt">MV-Adapter + GPT refine</option>
+          </select>
+        </label>
+      </div>
+
+      <p class="proj-hint" id="gptModeHint" hidden>🎨 Renders the mesh's normals per view (front/back/left/right/top), paints each with gpt-image-2, then back-projects. Needs OPENAI_API_KEY. ~5 calls per model.</p>
+      <p class="proj-hint" id="mvHint" hidden>🧩 MV-Adapter SDXL: AI does the heavy lifting — multi-view-consistent stylized texture for the existing mesh from one reference image, fewer manual steps. Needs one-time setup (~12GB weights, isolated env); status shown in the badge above.</p>
+      <p class="proj-hint" id="mvgptHint" hidden>🧩+🎨 MV-Adapter generates 6 consistent views, then gpt-image-2 refines each using your reference image(s) for higher-quality textures, then bakes. Falls back to Gemini "nano banana" if gpt-image-2 is unavailable. Needs OPENAI_API_KEY (or GEMINI_API_KEY) + MV-Adapter setup. ~6 calls per model.</p>
+
+      <div class="field" id="mvViewsetWrap" hidden>
+        <label>MV view set
+          <select id="mvViewset">
+            <option value="canonical">Canonical — front / back / sides / top / bottom</option>
+            <option value="corners">3/4 corners (tilted 45° down) — reaches occluded / between-object areas</option>
+            <option value="tilted">Tilted — cardinal views at 20°</option>
+            <option value="combined">Combined — 12 views: canonical + 45° tilted corners, Hunyuan-baked (best coverage of hidden faces, ~2× slower)</option>
+          </select>
+        </label>
+      </div>
+
+      <div id="gptPanel" class="proj-panel" hidden>
+        <p class="proj-hint" id="gptPanelHint">Reference image(s) of the desired object. Tag each with the side it shows — that reference then only steers matching views. Leave as "Any" to apply to all views.</p>
+        <div class="proj-grid">
+          <div class="vslot" id="gptRefSlot"><input type="file" accept="image/*" multiple hidden /><span class="vslot-label">Reference</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+        </div>
+        <div id="gptRefTags" class="ref-tags"></div>
+        <p class="proj-hint">Side tag = which face each reference depicts (front / back / left / right / top / bottom). Defaults to your shape image when none added.</p>
+      </div>
+
+      <div id="projPanel" class="proj-panel" hidden>
+        <p class="proj-hint">Front = image above. Click a slot to add a photo, or ✨ to AI-generate that view.</p>
+        <div class="proj-grid">
+          <div class="vslot" data-angle="back"><input type="file" accept="image/*" hidden /><span class="vslot-label">Back</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot" data-angle="left"><input type="file" accept="image/*" hidden /><span class="vslot-label">Left</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot" data-angle="right"><input type="file" accept="image/*" hidden /><span class="vslot-label">Right</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot" data-angle="top"><input type="file" accept="image/*" hidden /><span class="vslot-label">Top</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot" data-angle="bottom"><input type="file" accept="image/*" hidden /><span class="vslot-label">Bottom</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+        </div>
+        <p class="proj-hint" id="aiHint">✨ = AI-fill (uses gpt-image-2, one call each).</p>
+      </div>
+
+      <div class="field row">
+        <label class="check"><input id="removeBg" type="checkbox" checked /> Remove background</label>
+        <label class="check"><input id="autoTex" type="checkbox" /> Auto-texture</label>
+        <label class="check" title="Albedo only — flat colors, no metallic/roughness"><input id="albedoOnly" type="checkbox" /> Flat colors</label>
+      </div>
+
+      <details class="advanced">
+        <summary>Advanced settings</summary>
+        <div class="field">
+          <label>Inference steps <output id="stepsOut">30</output></label>
+          <input id="steps" type="range" min="1" max="50" value="30" />
+        </div>
+        <div class="field">
+          <label>Guidance scale <output id="guidanceOut">5.0</output></label>
+          <input id="guidance" type="range" min="0.5" max="15" step="0.5" value="5" />
+        </div>
+        <div class="field">
+          <label>Octree resolution <output id="octreeOut">256</output></label>
+          <input id="octree" type="range" min="64" max="512" step="64" value="256" />
+        </div>
+        <div class="field">
+          <label>Texture views <output id="viewsOut">7</output></label>
+          <input id="views" type="range" min="4" max="8" value="7" />
+        </div>
+        <div class="field">
+          <label>Texture resolution</label>
+          <select id="texRes" class="fmt">
+            <option value="512" selected>512 · fast</option>
+            <option value="768">768 · sharper, slow on 16GB</option>
+          </select>
+        </div>
+        <div class="field grid2">
+          <div>
+            <label>Seed</label>
+            <input id="seed" type="number" value="1234" min="0" />
+          </div>
+          <div>
+            <label>Mesh faces</label>
+            <input id="faceCount" type="number" value="40000" min="1000" step="1000" />
+          </div>
+        </div>
+      </details>
+
+      <button id="genBtn" class="btn primary" disabled>Generate Model</button>
+      <button id="texBtn" class="btn accent" disabled>Generate Texture</button>
+
+      <div id="progressWrap" class="progress-wrap" hidden>
+        <div class="progress-row">
+          <span id="statusText">Queued</span>
+          <span id="progressPct">5%</span>
+        </div>
+        <div class="bar"><div id="bar" class="bar-fill"></div></div>
+      </div>
+      <div id="error" class="error" hidden></div>
+    </section>
+
+    <!-- ── Viewer ─────────────────────────────── -->
+    <section class="panel viewer">
+      <div class="view-tabs">
+        <button id="tabShape" class="tab" disabled>Shape</button>
+        <button id="tabTex" class="tab" disabled>Textured</button>
+        <div id="exportBar" class="export" hidden>
+          <select id="fmt" class="fmt">
+            <option value="glb">GLB</option>
+            <option value="fbx">FBX</option>
+            <option value="blend">.blend</option>
+          </select>
+          <button id="download" class="tab download">↓ Download</button>
+        </div>
+      </div>
+      <div class="stage">
+        <model-viewer
+          id="mv"
+          camera-controls
+          auto-rotate
+          shadow-intensity="1"
+          exposure="1.0"
+          environment-image="neutral"
+          hidden></model-viewer>
+        <div id="placeholder" class="placeholder">
+          <span class="ph-icon">⬡</span>
+          <p>Your 3D model appears here</p>
+          <small>Upload an image and hit Generate Model</small>
+        </div>
+      </div>
+    </section>
+
+    <!-- ── Gallery ────────────────────────────── -->
+    <section class="panel gallery">
+      <div class="gallery-head">
+        <h2>Recent models</h2>
+        <button id="refreshGallery" class="ghost" title="Refresh">↻</button>
+      </div>
+      <div id="galleryStrip" class="gallery-strip">
+        <p class="gallery-empty">No models yet — generate one above.</p>
+      </div>
+    </section>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,54 @@
+# Hunyuan3D-2.1 Studio — one-command run:  docker compose up --build
+# Requires: NVIDIA GPU + nvidia-container-toolkit on the host.
+services:
+  hunyuan3d:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: hunyuan3d21-studio:latest
+    container_name: hunyuan3d-studio
+    ports:
+      - "8080:8080"
+    volumes:
+      # Persist HuggingFace weights across runs (first run downloads tens of GB).
+      - hf-cache:/root/.cache/huggingface
+      # Persist the shape-model checkpoints (downloaded to ~/.cache/hy3dgen).
+      - hy3dgen-cache:/root/.cache/hy3dgen
+      # Live-mount the web app (server + pipeline + static UI) so Python/JS edits
+      # apply on container restart with no image rebuild. Native exts live outside
+      # webapp/ (hy3dpaint, hy3dshape) and stay baked in the image.
+      - ./webapp:/workspace/Hunyuan3D-2.1/webapp
+      # Persist generated models on the host (subpath of the webapp mount above).
+      - ./webapp/outputs:/workspace/Hunyuan3D-2.1/webapp/outputs
+      # Persist the isolated MV-Adapter checkout + conda env across recreations.
+      - mvadapter:/opt/mvadapter
+    environment:
+      - HF_HOME=/root/.cache/huggingface
+      - HY3D_OUTPUT_DIR=/workspace/Hunyuan3D-2.1/webapp/outputs
+      - OPENAI_API_KEY=${OPENAI_API_KEY}  # gpt-image-2 texturing + projection AI-fill; set in .env or your shell.
+      - HF_TOKEN=${HF_TOKEN:-}            # authenticated HF downloads (faster, no rate-limit throttle)
+      - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # Gemini "nano banana" image-edit fallback for gpt-image-2
+      # MV-Adapter (isolated env on the mvadapter volume). SDXL base (SD2.1 is gated on
+      # HF); cpu-offload + 768/uv2048 keep it within 16GB. Tunables: MVADAPTER_OFFLOAD,
+      # MVADAPTER_HEIGHT, MVADAPTER_UV_SIZE.
+      - MVADAPTER_DIR=/opt/mvadapter/MV-Adapter
+      - MVADAPTER_CONDA_PREFIX=/opt/mvadapter/env
+    # Larger shared memory for the multiview texture pipeline.
+    shm_size: "8gb"
+    # Load the model at startup; remove --preload to load lazily on first job.
+    # --low_vram_mode keeps the shape model on CPU except during shape gen so the
+    # paint pipeline gets the full GPU during texturing (essential on 16GB cards).
+    command: ["python", "-m", "webapp.server", "--host", "0.0.0.0", "--port", "8080", "--preload", "--low_vram_mode"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
+  hy3dgen-cache:
+  mvadapter:

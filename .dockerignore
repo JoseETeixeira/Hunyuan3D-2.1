@@ -1,0 +1,19 @@
+.git
+.gitignore
+**/__pycache__
+*.pyc
+gradio_cache/
+save_dir/
+webapp/outputs/
+*.glb
+*.obj
+demo.glb
+demo_textured.glb
+docker/
+*.ipynb
+.venv/
+venv/
+# Stray Windows venv artifacts that may sit in the tree
+Lib/
+Scripts/
+pyvenv.cfg

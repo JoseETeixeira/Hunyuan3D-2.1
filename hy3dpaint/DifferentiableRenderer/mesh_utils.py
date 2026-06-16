@@ -14,7 +14,14 @@
 
 import os
 import cv2
-import bpy
+# bpy (Blender) is only used by convert_obj_to_glb() / its scene helpers, which run
+# solely on the save_glb=True path. PyPI dropped bpy<4.2 and bpy>=4.2 needs Python
+# >=3.11, so it is not installable in this py3.10 env. Make it optional: load_mesh /
+# save_mesh and the save_glb=False flow do not need it.
+try:
+    import bpy
+except (ImportError, ModuleNotFoundError):
+    bpy = None
 import math
 import numpy as np
 from io import StringIO
@@ -265,6 +272,11 @@ def convert_obj_to_glb(
     merge_vertices: bool = False,
 ) -> bool:
     """Convert OBJ file to GLB format using Blender."""
+    if bpy is None:
+        raise ImportError(
+            "convert_obj_to_glb requires the Blender 'bpy' module, which is not installed. "
+            "Use the save_glb=False path with create_glb_with_pbr_materials instead."
+        )
     try:
         _setup_blender_scene()
         _clear_scene_objects()
