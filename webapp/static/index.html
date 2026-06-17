@@ -43,26 +43,18 @@
             <option value="hunyuan">AI texture (Hunyuan PBR)</option>
             <option value="projection">Projection — your photos</option>
             <option value="gptproject">GPT texture — gpt-image-2 per view</option>
+            <option value="hyface">Per-face AI paint (Hunyuan)</option>
             <option value="mvadapter">MV-Adapter SDXL</option>
             <option value="mvgpt">MV-Adapter + GPT refine</option>
+            <option value="reface">Reface — depth-aware single face (existing texture)</option>
           </select>
         </label>
       </div>
 
       <p class="proj-hint" id="gptModeHint" hidden>🎨 Renders the mesh's normals per view (front/back/left/right/top), paints each with gpt-image-2, then back-projects. Needs OPENAI_API_KEY. ~5 calls per model.</p>
+      <p class="proj-hint" id="hyfaceHint" hidden>🧱 Per-face AI paint: front defaults to the image above, or drop a dedicated Front reference in the panel; add a reference per side and per 3/4 corner (Front-L/-R, Back-L/-R) too — corners you skip are gpt-synth'd automatically. Each face is painted individually with Hunyuan (its own reference, not one global style). Empty faces are auto-filled with gpt-image-2 from geometry + your other refs (needs OPENAI_API_KEY). Adds tilted + 3/4-corner fill views for depth coverage (more views = slower; tune with HYFACE_* env vars). Albedo-only matte.</p>
       <p class="proj-hint" id="mvHint" hidden>🧩 MV-Adapter SDXL: AI does the heavy lifting — multi-view-consistent stylized texture for the existing mesh from one reference image, fewer manual steps. Needs one-time setup (~12GB weights, isolated env); status shown in the badge above.</p>
       <p class="proj-hint" id="mvgptHint" hidden>🧩+🎨 MV-Adapter generates 6 consistent views, then gpt-image-2 refines each using your reference image(s) for higher-quality textures, then bakes. Falls back to Gemini "nano banana" if gpt-image-2 is unavailable. Needs OPENAI_API_KEY (or GEMINI_API_KEY) + MV-Adapter setup. ~6 calls per model.</p>
-
-      <div class="field" id="mvViewsetWrap" hidden>
-        <label>MV view set
-          <select id="mvViewset">
-            <option value="canonical">Canonical — front / back / sides / top / bottom</option>
-            <option value="corners">3/4 corners (tilted 45° down) — reaches occluded / between-object areas</option>
-            <option value="tilted">Tilted — cardinal views at 20°</option>
-            <option value="combined">Combined — 12 views: canonical + 45° tilted corners, Hunyuan-baked (best coverage of hidden faces, ~2× slower)</option>
-          </select>
-        </label>
-      </div>
 
       <div id="gptPanel" class="proj-panel" hidden>
         <p class="proj-hint" id="gptPanelHint">Reference image(s) of the desired object. Tag each with the side it shows — that reference then only steers matching views. Leave as "Any" to apply to all views.</p>
@@ -70,19 +62,47 @@
           <div class="vslot" id="gptRefSlot"><input type="file" accept="image/*" multiple hidden /><span class="vslot-label">Reference</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
         </div>
         <div id="gptRefTags" class="ref-tags"></div>
-        <p class="proj-hint">Side tag = which face each reference depicts (front / back / left / right / top / bottom). Defaults to your shape image when none added.</p>
+        <p class="proj-hint">Side tag = which face each reference depicts (front / back / left / right / top / bottom, or a 3/4 corner: front-left / front-right / back-left / back-right). Corner tags steer the matching 3/4 view in MV-Adapter + GPT refine. Defaults to your shape image when none added.</p>
       </div>
 
       <div id="projPanel" class="proj-panel" hidden>
         <p class="proj-hint">Front = image above. Click a slot to add a photo, or ✨ to AI-generate that view.</p>
         <div class="proj-grid">
+          <div class="vslot" id="projFrontSlot" data-angle="front" hidden><input type="file" accept="image/*" hidden /><span class="vslot-label">Front</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
           <div class="vslot" data-angle="back"><input type="file" accept="image/*" hidden /><span class="vslot-label">Back</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
           <div class="vslot" data-angle="left"><input type="file" accept="image/*" hidden /><span class="vslot-label">Left</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
           <div class="vslot" data-angle="right"><input type="file" accept="image/*" hidden /><span class="vslot-label">Right</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
           <div class="vslot" data-angle="top"><input type="file" accept="image/*" hidden /><span class="vslot-label">Top</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
           <div class="vslot" data-angle="bottom"><input type="file" accept="image/*" hidden /><span class="vslot-label">Bottom</span><button type="button" class="vslot-ai" title="AI-fill this view">✨</button><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot hyface-corner" data-angle="fl" hidden><input type="file" accept="image/*" hidden /><span class="vslot-label">Front-L</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot hyface-corner" data-angle="fr" hidden><input type="file" accept="image/*" hidden /><span class="vslot-label">Front-R</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot hyface-corner" data-angle="bl" hidden><input type="file" accept="image/*" hidden /><span class="vslot-label">Back-L</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+          <div class="vslot hyface-corner" data-angle="br" hidden><input type="file" accept="image/*" hidden /><span class="vslot-label">Back-R</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
         </div>
         <p class="proj-hint" id="aiHint">✨ = AI-fill (uses gpt-image-2, one call each).</p>
+      </div>
+
+      <div id="refacePanel" class="proj-panel" hidden>
+        <p class="proj-hint">🎯 Reface re-textures ONE face of an existing textured model, depth-aware: only the nearest (foreground) surfaces are repainted; farther geometry is left as-is (a car in front of a wall → only the car changes). Open/select a textured model, add reference(s) above, pick the face, and optionally upload a mask (white = repaint).</p>
+        <div class="field">
+          <label>Face
+            <select id="refaceFace" class="fmt">
+              <option value="front">Front</option>
+              <option value="back">Back</option>
+              <option value="left">Left</option>
+              <option value="right">Right</option>
+              <option value="top">Top</option>
+              <option value="bottom">Bottom</option>
+              <option value="fl">Front-left (3/4)</option>
+              <option value="fr">Front-right (3/4)</option>
+              <option value="bl">Back-left (3/4)</option>
+              <option value="br">Back-right (3/4)</option>
+            </select>
+          </label>
+        </div>
+        <div class="proj-grid">
+          <div class="vslot" id="refaceMaskSlot"><input type="file" accept="image/*" hidden /><span class="vslot-label">Mask (optional)</span><button type="button" class="vslot-rm" title="Remove" hidden>×</button></div>
+        </div>
       </div>
 
       <div class="field row">

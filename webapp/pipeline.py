@@ -397,6 +397,199 @@ class TextureWorker:
         return textured_path
 
     @torch.inference_mode()
+    def paint_faces(self, uid: str, shape_glb_path: str, view_specs, bake_exp=None, tex_resolution: int = None,
+                    albedo_labels=None):
+        """Per-view single-shot Hunyuan paint. `view_specs` = list of
+        (PIL ref, elev_deg, azim_deg, weight): run Hunyuan paint on ONE view per spec, each
+        conditioned on its OWN reference, then bake every painted view into one shared UV
+        texture with cosine/visibility weighting + inpaint. Single-view paint works because
+        the multiview net derives num_view from the control-image count (one normal+position
+        map -> num_view=1). Down-weighted fill views (corners/tilts) cover the oblique and
+        recessed texels the head-on cardinal views graze without overriding them; a lower
+        `bake_exp` spreads each view's contribution to reduce bare patches. Albedo-only matte.
+
+        `albedo_labels` (optional, parallel to view_specs): when given, each painted view's albedo
+        is saved to {output_dir}/{uid}_hyalbedo_{label}.png on a white background. The caller can then
+        re-bake those via the occlusion-aware single-winner blender projection (no cross-object blend).
+        """
+        import numpy as np
+        import trimesh
+        from PIL import Image
+        from utils.uvwrap_utils import mesh_uv_wrap
+
+        if tex_resolution:
+            self.paint_pipeline.config.resolution = int(tex_resolution)
+
+        labels = list(albedo_labels) if albedo_labels else None
+        specs = [(img, float(e), float(a), float(w), (labels[i] if labels and i < len(labels) else None))
+                 for i, (img, e, a, w) in enumerate(view_specs) if img is not None]
+        if not specs:
+            raise ValueError("No view specs provided")
+
+        pp = self.paint_pipeline
+        render_size = pp.config.render_size
+        res = pp.config.resolution
+
+        mesh = trimesh.load(shape_glb_path, force="mesh")
+        mesh = mesh_uv_wrap(mesh)
+        pp.render.load_mesh(mesh=mesh)
+
+        if self.sequential_vram:
+            self._move_multiview("cuda")  # bring the paint UNet onto the GPU
+
+        mv = pp.models["multiview_model"]
+        elevs, azims, albedos, weights = [], [], [], []
+        for ref, elev, azim, weight, label in specs:
+            # 1-view geometry control for THIS camera -> num_view=1 in the multiview net.
+            normal = pp.view_processor.render_normal_multiview([elev], [azim], use_abs_coor=True)[0]
+            position = pp.view_processor.render_position_multiview([elev], [azim])[0]
+            # Composite the reference onto white (avoid black halos), like generate_texture.
+            if ref.mode == "RGBA":
+                white = Image.new("RGB", ref.size, (255, 255, 255))
+                white.paste(ref, mask=ref.getchannel("A"))
+                ref_rgb = white
+            else:
+                ref_rgb = ref.convert("RGB")
+            pbr = mv([ref_rgb], [normal, position], prompt="high quality",
+                     custom_view_size=res, resize_input=True)
+            albedo = pp.models["super_model"](pbr["albedo"][0]).resize((render_size, render_size))
+            if label:
+                albedo.convert("RGB").save(os.path.join(self.output_dir, f"{uid}_hyalbedo_{label}.png"))
+            elevs.append(elev); azims.append(azim); albedos.append(albedo); weights.append(weight)
+
+        prev_exp = pp.config.bake_exp
+        if bake_exp:
+            pp.config.bake_exp = float(bake_exp)
+        try:
+            texture, mask = pp.view_processor.bake_from_multiview(albedos, elevs, azims, weights)
+        finally:
+            pp.config.bake_exp = prev_exp
+        mask_np = (mask.squeeze(-1).cpu().numpy() * 255).astype(np.uint8)
+        texture = pp.view_processor.texture_inpaint(texture, mask_np)
+        pp.render.set_texture(texture, force_set=True)
+
+        if self.sequential_vram:
+            self._move_multiview("cpu")  # park it again so shape gen has headroom
+
+        obj_path = os.path.join(self.output_dir, f"{uid}_hyface.obj")
+        pp.render.save_mesh(obj_path, downsample=True)
+
+        # Albedo-only matte (OBJ + map_Kd) straight to GLB, like project_texture.
+        textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
+        mesh_out = trimesh.load(obj_path)
+        _force_matte(mesh_out)
+        mesh_out.export(textured_path)
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return textured_path
+
+    @torch.inference_mode()
+    def reface(self, uid: str, textured_glb_path: str, elev: float, azim: float, view_image,
+               depth_band: float = 0.35, mask=None):
+        """Depth-aware single-view re-texture of an ALREADY-textured mesh.
+
+        Loads the mesh preserving its existing UVs + texture (the base), then bakes
+        `view_image` (the improved view) onto ONLY the nearest depth band (foreground) at the
+        (elev, azim) camera and composites over the base — so farther surfaces keep their
+        current texture (a car in front of a wall: only the car is repainted). Works for any
+        camera: the 6 cardinal faces and the 3/4 corners (fl/fr/bl/br). `mask` (PIL, white =
+        repaint) overrides the auto depth band when provided. Albedo-only matte output.
+        """
+        import math
+        import numpy as np
+        import trimesh
+        from PIL import Image
+        from DifferentiableRenderer.camera_utils import get_mv_matrix
+
+        elev, azim = float(elev), float(azim)
+        pp = self.paint_pipeline
+        render = pp.render
+        rs = pp.config.render_size
+
+        # 1) Load the textured mesh PRESERVING its UVs + texture (the base to composite over).
+        #    No mesh_uv_wrap: re-unwrapping would discard the existing texture's UV layout.
+        mesh = trimesh.load(textured_glb_path, force="mesh")
+        render.load_mesh(mesh=mesh)
+        base = torch.from_numpy(render.get_texture()).float().to(render.device)  # (Ht,Wt,3) in [0,1]
+
+        # 2) Screen-space depth at the face camera. POSITION encodes each vertex as
+        #    (0.5 - vtx_pos/scale_factor) in [0,1] — NOT raw world — so recover the world
+        #    position before measuring depth. Validity = the alpha silhouette (POSITION fills
+        #    background white). Camera position = -R^T t from the view matrix (same normalized
+        #    frame as vtx_pos); euclidean distance is sign-safe (near = small).
+        pos = render.render_position(elev, azim, resolution=rs, return_type="th").detach().cpu().numpy().reshape(rs, rs, 3)
+        alpha = render.render_alpha(elev, azim, resolution=rs, return_type="th").detach().cpu().numpy().reshape(rs, rs)
+        valid = alpha > 0
+        world = (0.5 - pos) * float(render.scale_factor)
+        w2c = np.asarray(get_mv_matrix(elev, azim, render.camera_distance), dtype=np.float32)
+        cam = -w2c[:3, :3].T @ w2c[:3, 3]
+        depth = np.linalg.norm(world - cam[None, None, :], axis=-1)
+
+        # 3) Foreground mask: explicit mask overrides; else keep the nearest depth band.
+        if mask is not None:
+            fg = (np.asarray(mask.convert("L").resize((rs, rs))) > 127) & valid
+        else:
+            dv = depth[valid]
+            if dv.size and float(dv.max()) > float(dv.min()):
+                thr = float(dv.min()) + float(depth_band) * (float(dv.max()) - float(dv.min()))
+                fg = valid & (depth <= thr)
+            else:
+                fg = valid  # no depth spread (flat face) -> repaint all of it
+        fg_alpha = (fg.astype(np.uint8) * 255)
+
+        # 4) Bake the masked view as RGBA -> back_project carries the fg mask in the baked alpha.
+        view = view_image.convert("RGB").resize((rs, rs))
+        rgba = np.dstack([np.asarray(view), fg_alpha]).astype(np.float32) / 255.0
+        new_tex, cos_map, _ = render.back_project(rgba, elev, azim)
+        fg_uv = (cos_map[..., 0] > 1e-4) & (new_tex[..., 3] > 0.5)
+
+        try:
+            _dv = depth[valid]
+            _lo, _hi = (float(_dv.min()), float(_dv.max())) if _dv.size else (0.0, 0.0)
+            print(f"[reface] silhouette={int(valid.sum())}px depth=[{_lo:.3f},{_hi:.3f}] "
+                  f"foreground={int(fg.sum())}px visible_texels={int((cos_map[..., 0] > 1e-4).sum().item())} "
+                  f"repainted_texels={int(fg_uv.sum().item())}")
+        except Exception as _e:  # noqa: BLE001
+            print(f"[reface] diag failed: {_e}")
+
+        # 5) Composite foreground texels over the existing base; everything else untouched.
+        out = base.clone()
+        out[fg_uv] = new_tex[..., :3][fg_uv]
+        render.set_texture(out, force_set=True)
+
+        obj_path = os.path.join(self.output_dir, f"{uid}_reface.obj")
+        render.save_mesh(obj_path, downsample=True)
+        textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
+        mesh_out = trimesh.load(obj_path)
+        _force_matte(mesh_out)
+        mesh_out.export(textured_path)
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return textured_path
+
+    @torch.inference_mode()
+    def render_geometry_at(self, shape_glb_path: str, cams):
+        """Render surface-normal maps at explicit labeled cameras. `cams` = list of
+        (label, elev_deg, azim_deg). Returns {label: PIL normal}. Generalizes
+        render_view_geometry (limited to the 6 canonical PROJECTION_CAMS) for fill/corner
+        cameras at arbitrary angles — used to seed gpt-synth corner references."""
+        import trimesh
+        from utils.uvwrap_utils import mesh_uv_wrap
+
+        if not cams:
+            return {}
+        pp = self.paint_pipeline
+        mesh = trimesh.load(shape_glb_path, force="mesh")
+        mesh = mesh_uv_wrap(mesh)
+        pp.render.load_mesh(mesh=mesh)
+        elevs = [float(e) for _, e, _ in cams]
+        azims = [float(a) for _, _, a in cams]
+        normals = pp.view_processor.render_normal_multiview(elevs, azims)
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return {lbl: nrm for (lbl, _, _), nrm in zip(cams, normals)}
+
+    @torch.inference_mode()
     def render_view_geometry(self, shape_glb_path: str, angles):
         """Render the mesh's surface-normal map from each canonical camera angle.
 

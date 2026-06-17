@@ -82,18 +82,27 @@ let openaiAvailable = false;
 const texmodeSel = document.getElementById("texmode");
 function applyTextureMode() {
   textureMode = texmodeSel ? texmodeSel.value : textureMode;
-  els.projPanel.hidden = textureMode !== "projection";
-  const usesRef = ["gptproject", "mvadapter", "mvgpt"].includes(textureMode);
+  // hyface reuses the projection per-side upload panel (one reference per face).
+  els.projPanel.hidden = !["projection", "hyface"].includes(textureMode);
+  // The explicit Front slot + 3/4 corner slots are hyface-only; projection keeps front =
+  // the main image and has no corner views.
+  const projFront = document.getElementById("projFrontSlot");
+  if (projFront) projFront.hidden = textureMode !== "hyface";
+  document.querySelectorAll("#projPanel .hyface-corner").forEach((s) => { s.hidden = textureMode !== "hyface"; });
+  const usesRef = ["gptproject", "mvadapter", "mvgpt", "reface"].includes(textureMode);
   const gptPanel = document.getElementById("gptPanel");
   if (gptPanel) gptPanel.hidden = !usesRef;
+  const refacePanel = document.getElementById("refacePanel");
+  if (refacePanel) refacePanel.hidden = textureMode !== "reface";
   const gptModeHint = document.getElementById("gptModeHint");
   if (gptModeHint) gptModeHint.hidden = textureMode !== "gptproject";
+  const hyfaceHint = document.getElementById("hyfaceHint");
+  if (hyfaceHint) hyfaceHint.hidden = textureMode !== "hyface";
   const mvHint = document.getElementById("mvHint");
   if (mvHint) mvHint.hidden = textureMode !== "mvadapter";
   const mvgptHint = document.getElementById("mvgptHint");
   if (mvgptHint) mvgptHint.hidden = textureMode !== "mvgpt";
-  const mvViewsetWrap = document.getElementById("mvViewsetWrap");
-  if (mvViewsetWrap) mvViewsetWrap.hidden = !["mvadapter", "mvgpt"].includes(textureMode);
+  if (typeof setBusy === "function") setBusy(false);  // reface enables the texture button w/o an upload
 }
 if (texmodeSel) {
   texmodeSel.addEventListener("change", applyTextureMode);
@@ -103,7 +112,8 @@ if (texmodeSel) {
 // ── GPT/MV-Adapter: optional style reference image(s) ─────
 let gptReferenceFiles = [];
 let gptReferenceSides = [];   // side tag per reference file (parallel array)
-const REF_SIDES = ["any", "front", "back", "left", "right", "top", "bottom"];
+const REF_SIDES = ["any", "front", "back", "left", "right", "top", "bottom", "fl", "fr", "bl", "br"];
+const SIDE_LABELS = { fl: "Front-left", fr: "Front-right", bl: "Back-left", br: "Back-right" };
 const gptRefTags = document.getElementById("gptRefTags");
 
 function renderRefTags() {
@@ -123,7 +133,7 @@ function renderRefTags() {
     REF_SIDES.forEach((s) => {
       const o = document.createElement("option");
       o.value = s;
-      o.textContent = s === "any" ? "Any view" : s.charAt(0).toUpperCase() + s.slice(1);
+      o.textContent = s === "any" ? "Any view" : (SIDE_LABELS[s] || s.charAt(0).toUpperCase() + s.slice(1));
       if (s === gptReferenceSides[i]) o.selected = true;
       sel.appendChild(o);
     });
@@ -178,18 +188,22 @@ function appendReferences(fd) {
 function refreshSlot(slot) {
   const angle = slot.dataset.angle;
   const hasPhoto = !!viewFiles[angle];
-  const aiBtn = slot.querySelector(".vslot-ai");
+  const aiBtn = slot.querySelector(".vslot-ai");   // front slot has no AI-fill button
   slot.querySelector(".vslot-rm").hidden = !hasPhoto;
-  aiBtn.hidden = hasPhoto;                       // a real photo overrides AI
-  aiBtn.disabled = !openaiAvailable;
-  aiBtn.classList.toggle("on", !hasPhoto && openaiAvailable && aiAngles.has(angle));
+  if (aiBtn) {
+    aiBtn.hidden = hasPhoto;                       // a real photo overrides AI
+    aiBtn.disabled = !openaiAvailable;
+    aiBtn.classList.toggle("on", !hasPhoto && openaiAvailable && aiAngles.has(angle));
+  }
   slot.classList.toggle("filled", hasPhoto);
 }
 
 document.querySelectorAll("#projPanel .vslot").forEach((slot) => {
   const angle = slot.dataset.angle;
   const input = slot.querySelector("input");
-  aiAngles.add(angle); // default: AI-fill on for empty slots
+  // AI-fill default on for the projection cardinal slots only. Front falls back to the main
+  // image; hyface corners (fl/fr/bl/br) gpt-synth automatically server-side.
+  if (!["front", "fl", "fr", "bl", "br"].includes(angle)) aiAngles.add(angle);
 
   slot.addEventListener("click", (e) => {
     if (e.target.closest(".vslot-ai") || e.target.closest(".vslot-rm")) return;
@@ -202,7 +216,8 @@ document.querySelectorAll("#projPanel .vslot").forEach((slot) => {
     slot.style.backgroundImage = `url(${URL.createObjectURL(f)})`;
     refreshSlot(slot);
   });
-  slot.querySelector(".vslot-ai").addEventListener("click", (e) => {
+  const aiBtn = slot.querySelector(".vslot-ai");
+  if (aiBtn) aiBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     aiAngles.has(angle) ? aiAngles.delete(angle) : aiAngles.add(angle);
     refreshSlot(slot);
@@ -216,6 +231,28 @@ document.querySelectorAll("#projPanel .vslot").forEach((slot) => {
   });
   refreshSlot(slot);
 });
+
+// ── Reface: optional override mask (white = repaint) ──────
+let refaceMaskFile = null;
+const refaceMaskSlot = document.getElementById("refaceMaskSlot");
+if (refaceMaskSlot) {
+  const mi = refaceMaskSlot.querySelector("input");
+  const mrm = refaceMaskSlot.querySelector(".vslot-rm");
+  refaceMaskSlot.addEventListener("click", (e) => { if (e.target.closest(".vslot-rm")) return; mi.click(); });
+  mi.addEventListener("change", (e) => {
+    const f = e.target.files[0];
+    if (!f || !f.type.startsWith("image/")) return;
+    refaceMaskFile = f;
+    refaceMaskSlot.style.backgroundImage = `url(${URL.createObjectURL(f)})`;
+    refaceMaskSlot.classList.add("filled");
+    mrm.hidden = false;
+  });
+  mrm.addEventListener("click", (e) => {
+    e.stopPropagation();
+    refaceMaskFile = null; mi.value = "";
+    refaceMaskSlot.style.backgroundImage = ""; refaceMaskSlot.classList.remove("filled"); mrm.hidden = true;
+  });
+}
 
 // ── Generate shape ────────────────────────────────────────
 els.genBtn.addEventListener("click", async () => {
@@ -235,13 +272,14 @@ els.genBtn.addEventListener("click", async () => {
   fd.append("tex_resolution", els.texRes.value);
   fd.append("albedo_only", els.albedoOnly.checked);
   fd.append("texture_mode", textureMode);
-  if (textureMode === "projection") {
+  if (textureMode === "projection" || textureMode === "hyface") {
     for (const [angle, f] of Object.entries(viewFiles)) fd.append(angle, f);
+  }
+  if (textureMode === "projection") {
     const fill = [...aiAngles].filter((a) => !viewFiles[a]); // only empty slots marked ✨
     fd.append("ai_fill_angles", fill.join(","));
   }
   if (["gptproject", "mvadapter", "mvgpt"].includes(textureMode)) appendReferences(fd);
-  if (["mvadapter", "mvgpt"].includes(textureMode)) { const mv = document.getElementById("mvViewset"); if (mv) fd.append("mv_viewset", mv.value); }
 
   setBusy(true);
   showProgress("Queued", 5);
@@ -263,16 +301,37 @@ function appendTextureFields(fd) {
   fd.append("views", els.views.value);
   fd.append("tex_resolution", els.texRes.value);
   fd.append("albedo_only", els.albedoOnly.checked);
-  if (textureMode === "projection") {
+  if (textureMode === "projection" || textureMode === "hyface") {
     for (const [angle, f] of Object.entries(viewFiles)) fd.append(angle, f);
+  }
+  if (textureMode === "projection") {
     fd.append("ai_fill_angles", [...aiAngles].filter((a) => !viewFiles[a]).join(","));
   }
   if (["gptproject", "mvadapter", "mvgpt"].includes(textureMode)) appendReferences(fd);
-  if (["mvadapter", "mvgpt"].includes(textureMode)) { const mv = document.getElementById("mvViewset"); if (mv) fd.append("mv_viewset", mv.value); }
 }
 els.texBtn.addEventListener("click", async () => {
   hideError();
   try {
+    if (textureMode === "reface") {
+      // Depth-aware single-face re-texture of an existing TEXTURED model.
+      const sid = retextureSource || currentJob;
+      if (!sid) { showError("Open or select a textured model first (Reface edits an existing texture)"); return; }
+      if (!gptReferenceFiles.length) { showError("Add at least one reference image for Reface"); return; }
+      setBusy(true); showProgress("Queued (reface)", 60);
+      const fd = new FormData();
+      fd.append("source_id", sid);
+      fd.append("face", document.getElementById("refaceFace").value);
+      fd.append("remove_background", els.removeBg.checked);
+      appendReferences(fd);
+      if (refaceMaskFile) fd.append("mask", refaceMaskFile);
+      const res = await fetch("/api/reface", { method: "POST", body: fd });
+      if (!res.ok) throw new Error((await res.json()).detail || res.statusText);
+      resetOutputs();
+      currentJob = (await res.json()).id;
+      exitRetexture();
+      poll();
+      return;
+    }
     if (retextureSource) {
       if (!selectedFiles.length) { showError("Upload a front image to retexture"); return; }
       setBusy(true); showProgress("Queued for texturing", 60);
@@ -447,7 +506,10 @@ async function deleteModel(id, card) {
 // ── UI helpers ────────────────────────────────────────────
 function setBusy(b) {
   els.genBtn.disabled = b || !selectedFiles.length;
-  els.texBtn.disabled = b || (!shapeUrl && !(retextureSource && selectedFiles.length));
+  // Reface edits an EXISTING textured model, so it needs a source (selected or current) but
+  // not a freshly uploaded image.
+  const refaceReady = textureMode === "reface" && (retextureSource || currentJob);
+  els.texBtn.disabled = b || (!refaceReady && !shapeUrl && !(retextureSource && selectedFiles.length));
 }
 function showProgress(text, pct) {
   els.progressWrap.hidden = false;

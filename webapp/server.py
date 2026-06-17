@@ -120,11 +120,62 @@ _MVGPT_ELEVATIONS = os.environ.get("MVGPT_ELEVATIONS", "1").lower() not in ("0",
 _MVGPT_MODE = os.environ.get("MVGPT_MODE", "blender").lower()
 # Cosine exponent for the direct elevation bake (MVGPT_MODE=direct).
 _MVGPT_DIRECT_BAKE_EXP = float(os.environ.get("MVGPT_DIRECT_BAKE_EXP", "6"))
+# MVGPT_MODE=blender extras (default ON):
+#   PBR_BASE — paint a Hunyuan PBR base first; elevations overlay its colour, its metallic/
+#              roughness are kept, and its albedo gap-fills faces the elevations don't cover.
+#   GEOMATCH — gpt-image adapts each elevation to the face's grey-rendered shape/relief before
+#              projection (appearance from the elevation, shape from the geometry render).
+_MVGPT_PBR_BASE = os.environ.get("MVGPT_PBR_BASE", "1").lower() not in ("0", "false", "no")
+_MVGPT_GEOMATCH = os.environ.get("MVGPT_GEOMATCH", "1").lower() not in ("0", "false", "no")
+# mvgpt: also render + project 3/4 CORNER views. RE-ENABLED for testing — corners now run through the
+# same improved path (geometry-authority gen + adjacent-face + top refs + consistency refs + brighter
+# geom lighting + source-of-truth transfer). Disable with MVGPT_CORNERS=0 to leave corners to Hunyuan.
+_MVGPT_CORNERS = os.environ.get("MVGPT_CORNERS", "1").lower() not in ("0", "false", "no")
+_MVGPT_CORNER_SIDES = ["fr", "fl", "br", "bl"]
+# Add a HIGH 3/4 tilt tier (steep top-down per corner) on top of the mid corners — covers roof
+# edges + prop tops the flatter corners and the absolute top-down only graze. Disable with MVGPT_TILTS=0.
+_MVGPT_TILTS = os.environ.get("MVGPT_TILTS", "1").lower() not in ("0", "false", "no")
+_MVGPT_TILT_SIDES = ["fr_hi", "fl_hi", "br_hi", "bl_hi"]
+# Optionally project a BOTTOM view. DEFAULT OFF — the base underside is left to the Hunyuan PBR paint.
+_MVGPT_BOTTOM = os.environ.get("MVGPT_BOTTOM", "0").lower() not in ("0", "false", "no")
 # Hunyuan elevation that places the TOP elevation on the GLB roof (model-viewer +Y). The
 # render frame is flipped vs the saved-GLB frame (get_mesh inverts the load transform), so
 # the correct pole is empirical — user reported el=-89.99 lands on the underside, so default
 # to +89.99. Flip via MVGPT_TOP_EL=-89.99. Verify with webapp/diag_glbframe.py.
 _MVGPT_TOP_EL = float(os.environ.get("MVGPT_TOP_EL", "89.99"))
+
+# hyface per-face paint — fill views add angular coverage so the oblique/recessed texels
+# the 6 cardinal views only graze (low cos -> masked -> inpainted -> look unpainted) get
+# actually painted. Corners (3/4 diagonals tilted down) reach recessed tops; tilted
+# cardinals thicken each face above/below the equator. Fills are down-weighted so the
+# head-on cardinal faces stay crisp; a lower bake_exp spreads contribution into the gaps.
+# Cost scales with view count (each view = one diffusion pass) — dial back via these knobs.
+_HYFACE_CORNERS = os.environ.get("HYFACE_CORNERS", "1").lower() not in ("0", "false", "no")
+_HYFACE_CORNER_ELEV = float(os.environ.get("HYFACE_CORNER_ELEV", "45"))   # down-tilt to see over recessed tops
+_HYFACE_TILT = os.environ.get("HYFACE_TILT", "1").lower() not in ("0", "false", "no")
+_HYFACE_TILT_ELEV = float(os.environ.get("HYFACE_TILT_ELEV", "20"))       # cardinal tilt magnitude (deg)
+_HYFACE_FILL_WEIGHT = float(os.environ.get("HYFACE_FILL_WEIGHT", "0.3"))  # fill weight vs cardinals (1.0)
+# Bake cosine exponent. The bake blends views by weight*cos(view,normal)**exp; a LOW exp blends many
+# overlapping views per texel, so on closely-spaced objects (the two cars) each car's inner/side faces
+# pick up a soft mix of the front + neighbour-side projections (blue car gets a tan-ish flank, tan car a
+# blue one). A HIGH exp drives the bake toward winner-take-all: each texel takes the single most head-on
+# view that is NOT occluded there (back_project already zeroes occluded texels), so the correct view wins
+# and the cross-car bleed collapses (same single-winner behaviour that keeps the mvgpt blender bake clean).
+_HYFACE_BAKE_EXP = float(os.environ.get("HYFACE_BAKE_EXP", "8"))
+
+# reface — depth-aware single-face re-texture of an already-textured mesh. Foreground = the
+# nearest depth band (fraction of the face's depth range, 0..1); only those texels are
+# repainted, farther surfaces keep their existing texture. A user mask overrides the band.
+_REFACE_DEPTH_BAND = float(os.environ.get("REFACE_DEPTH_BAND", "0.35"))
+# Slight front-cardinal weight bump so the front (which sees the whole lot in true colours) wins ties on
+# shared front-lot faces; with the high bake exponent above this only needs to break ties, not dominate.
+_HYFACE_FRONT_WEIGHT = float(os.environ.get("HYFACE_FRONT_WEIGHT", "1.5"))
+# Optional: re-bake the per-face Hunyuan albedos through the occlusion-aware single-winner blender
+# projection instead of Hunyuan's cosine bake. DISABLED BY DEFAULT — it regressed the result (broke the
+# cars), so hyface uses the plain Hunyuan cosine bake. Opt in experimentally with HYFACE_BLENDER_BAKE=1.
+_HYFACE_BLENDER_BAKE = os.environ.get("HYFACE_BLENDER_BAKE", "0").lower() not in ("0", "false", "no")
+# Blender rig sides a hyface albedo can re-bake onto (cardinals + 3/4 corners; tilts/bottom excluded).
+_HYFACE_BAKE_SIDES = {"front", "back", "left", "right", "top", "fl", "fr", "bl", "br"}
 
 
 def _prep_view(worker, img, remove_bg: bool, flip: bool):
@@ -165,6 +216,11 @@ def _openai_paint_view(geometry_img, reference_imgs, angle: str):
         "only. Borrow their palette, material treatment, surface-detail language, and art style, "
         "but never their geometry, silhouette, camera angle, pose, object design, proportions, "
         "composition, lighting setup, background, or extra elements. "
+        ""
+        "Keep each DISTINCT object's OWN colour — match a colour to an object by its position/identity "
+        "across the references, do NOT wash every similar object into one palette (e.g. a blue car on "
+        "one side and a tan car on another are SEPARATE vehicles and KEEP their own colours; never paint "
+        "the blue car tan or the tan car blue). "
         ""
         "Priority order: 1) match Image 1 geometry, silhouette and composition exactly; "
         "2) cover the whole silhouette with coherent texture; "
@@ -448,21 +504,87 @@ def _mv_texture(job_id, gpt_refine):
     if gpt_refine and _MVGPT_ELEVATIONS and _src and os.path.exists(_src):
         from webapp.elevations import ELEVATION_SIDES, generate_elevations
         provided = {s: p for p, s in zip(refs, ref_sides) if s in ELEVATION_SIDES}
-        extra = [p for p, s in zip(refs, ref_sides) if s not in ELEVATION_SIDES]
+        # Explicit 3/4-corner references (fl/fr/bl/br tags) used directly for the corner views.
+        corner_provided = {s: p for p, s in zip(refs, ref_sides)
+                           if s in ("fl", "fr", "bl", "br") and p and os.path.exists(p)}
+        extra = [p for p, s in zip(refs, ref_sides)
+                 if s not in ELEVATION_SIDES and s not in ("fl", "fr", "bl", "br")]
         _set(job_id, status="processing_texture", progress=64,
              message=f"Generating {len(ELEVATION_SIDES)} canonical elevations from the 3/4 source")
         elevations = generate_elevations(_src, provided=provided, extra_context=extra,
                                          out_dir=str(OUTPUT_DIR), uid=job_id)
 
         if _MVGPT_MODE == "blender":
-            # Camera-projection bake in Blender: standard conventions (no pole/azimuth
-            # guessing) + uniform ortho framing (no fill-stretch). Faces + scale fixed at
-            # the source. Writes blenderproj_cam_<side>.png debug renders alongside. Falls
-            # back to the in-process direct bake if Blender is missing or errors.
+            # Camera-projection bake in Blender: standard conventions (no pole/azimuth guessing)
+            # + uniform ortho framing (no fill-stretch). Optional stages: (a) gpt geometry-match
+            # each elevation to the face's relief (MVGPT_GEOMATCH); (b) Hunyuan PBR base painted
+            # first so the elevations overlay its colour while keeping its metallic/roughness and
+            # gap-filling uncovered faces (MVGPT_PBR_BASE). Falls back to the in-process direct
+            # bake if Blender is missing or errors.
+            front_elev = elevations.get("front") or _src  # clean front for PBR conditioning
+            if _MVGPT_GEOMATCH:
+                try:
+                    from webapp.gen_transfer import ADJ
+                    have_src = bool(_src and os.path.exists(_src))
+                    corner_sides = list(_MVGPT_CORNER_SIDES) if (_MVGPT_CORNERS and have_src) else []
+                    # Always include user-provided corners, even if the auto-corner tier is off / no 3/4 source.
+                    for _cs in corner_provided:
+                        if _cs not in corner_sides:
+                            corner_sides.append(_cs)
+                    # tilt tier uses adjacent-face refs (top/front/right...), not the 3/4 source, so it
+                    # does not need have_src.
+                    tilt_sides = _MVGPT_TILT_SIDES if _MVGPT_TILTS else []
+                    extra = ["bottom"] if _MVGPT_BOTTOM else []
+                    sides_all = list(elevations.keys()) + corner_sides + tilt_sides + extra
+                    _set(job_id, status="processing_texture", progress=72,
+                         message="Rendering geometry + colourising views")
+                    geom = _blender_geometry(job_id, job["shape_path"], sides_all)
+                    orig = dict(elevations)  # clean per-side user refs, by side
+                    new_elev = {}
+                    # Unified per-view texture: gpt GENERATES each view from the geometry render + that
+                    # view's colour refs (cardinal = its own face; corner = adjacent faces + top; bottom/
+                    # missing = the 3/4 source), then Gemini TRANSFERS it onto the geom. Same path for
+                    # every face -> consistent style; geometry is the authority so nothing is invented.
+                    cardinal = ["front", "back", "left", "right", "top"]
+                    # front first: its genview + elevmatched anchor the art style of all other faces
+                    ordered = (["front"] if "front" in sides_all else []) + [s for s in sides_all if s != "front"]
+                    style_gv, style_elev = [], []
+                    for s in ordered:
+                        if not geom.get(s):
+                            continue
+                        faces = ADJ.get(s, [s])
+                        if s in corner_provided:
+                            # user gave an explicit reference for this 3/4 corner -> use it as the
+                            # colour authority (adjacent-face elevations still ride as consistency refs)
+                            refs = [corner_provided[s]]
+                        else:
+                            refs = [orig[f] for f in faces if orig.get(f) and os.path.exists(orig[f])]
+                            if not refs and have_src:
+                                refs = [_src]
+                        # other faces -> consistency refs so shared objects stay consistent across views
+                        cons = [orig[f] for f in cardinal
+                                if f not in faces and orig.get(f) and os.path.exists(orig[f])]
+                        new_elev[s] = _view_texture(job_id, s, refs, geom[s], consistency_refs=cons,
+                                                    style_gv=style_gv, style_elev=style_elev)
+                        if s == "front":  # anchor the rest on the front result
+                            style_gv = [str(OUTPUT_DIR / f"{job_id}_genview_front.png")]
+                            style_elev = [new_elev[s]]
+                    if new_elev:
+                        elevations = new_elev
+                except Exception as e:  # noqa: BLE001
+                    print(f"[server] geometry-match skipped ({e})")
+            base_glb = None
+            if _MVGPT_PBR_BASE:
+                try:
+                    _set(job_id, status="processing_texture", progress=80,
+                         message="Painting Hunyuan PBR base (albedo + metallic/roughness)")
+                    base_glb = _hunyuan_pbr_base(job_id, job["shape_path"], front_elev, job["params"])
+                except Exception as e:  # noqa: BLE001
+                    print(f"[server] Hunyuan PBR base skipped ({e})")
             _set(job_id, status="processing_texture", progress=86,
                  message="Projecting elevations onto the mesh with Blender")
             try:
-                textured_path = _blender_project_bake(job_id, job["shape_path"], elevations)
+                textured_path = _blender_project_bake(job_id, job["shape_path"], elevations, base_glb=base_glb)
                 _set(job_id, status="completed", progress=100, message="Done",
                      textured_path=textured_path, textured_url=f"/api/files/{Path(textured_path).name}")
                 return
@@ -476,8 +598,10 @@ def _mv_texture(job_id, gpt_refine):
             # Cardinal face -> Hunyuan (elev, azim). Equator faces at el=0; top viewed from
             # ABOVE = negative elevation (Hunyuan's get_mv_matrix flips elevation internally).
             # Bottom is omitted (the 3/4 source has no underside) -> UV-inpaint fills it.
-            CARDINAL = [("front", 0.0, 0.0), ("right", 0.0, 90.0), ("back", 0.0, 180.0),
-                        ("left", 0.0, 270.0), ("top", _MVGPT_TOP_EL, 0.0)]
+            # left=azim90, right=azim270 to match the hyface PROJECTION_CAMS convention (same engine),
+            # so a "left"/"right" reference lands on the same physical side as in per-face paint.
+            CARDINAL = [("front", 0.0, 0.0), ("left", 0.0, 90.0), ("back", 0.0, 180.0),
+                        ("right", 0.0, 270.0), ("top", _MVGPT_TOP_EL, 0.0)]
             items = [(worker.rembg(Image.open(elevations[s]).convert("RGB")), el, az + _MV_AZ_OFFSET)
                      for s, el, az in CARDINAL if elevations.get(s)]
             textured_path = worker.project_texture_angles(
@@ -561,6 +685,253 @@ def _run_mvgpt(job_id):
     return _mv_texture(job_id, gpt_refine=True)
 
 
+# Canonical faces for per-face paint (order = display + dedup order).
+HYFACE_FACES = ["front", "back", "left", "right", "top", "bottom"]
+
+# Corner fill cameras: {label: (azimuth, [adjacent cardinal faces])}. Azimuth follows
+# PROJECTION_CAMS (front=0, left=90, back=180, right=270); each corner sits between two
+# faces and tilts down (+elev) to reach recessed tops. The adjacent faces' references seed
+# the gpt-synth corner reference (geometry render is the layout lock).
+HYFACE_CORNER_CAMS = {
+    "fl": (45.0, ["front", "left"]),
+    "bl": (135.0, ["back", "left"]),
+    "br": (225.0, ["back", "right"]),
+    "fr": (315.0, ["front", "right"]),
+}
+# Equatorial cardinals that also get tilted (elev +/-) views. Poles (top/bottom) excluded.
+HYFACE_TILT_FACES = ["front", "back", "left", "right"]
+
+
+def _prep_face_ref(worker, img, rb):
+    """Background-prep a hyface paint reference. The salient-object remover (rembg) OVER-SEGMENTS the
+    multi-element generated/staged refs (building + storefront + lot + cars on a near-black field): it
+    keeps only the high-contrast upper facade and cuts the lower storefront/pillars/cars/lot. Those cut
+    pixels then composite to WHITE, so Hunyuan paints the lower front blank -> the unpainted white areas.
+    When the reference already has a near-uniform DARK background, key out ONLY that background by a tight
+    threshold and keep the whole subject; fall back to rembg only for real photos (non-uniform background).
+    Returns an RGB image with a clean white background (paint_faces consumes RGB as-is)."""
+    import numpy as np
+    rgb = np.asarray(img.convert("RGB"))
+    border = np.concatenate([rgb[0], rgb[-1], rgb[:, 0], rgb[:, -1]], axis=0).astype(np.int16)
+    dark_uniform = float((border.max(-1) < 30).mean()) > 0.6
+    if rb and dark_uniform:
+        bg = rgb.max(-1) < 28                       # only the near-pure-black frame, not dark glass/navy
+        out = rgb.copy()
+        out[bg] = 255
+        return Image.fromarray(out)
+    if rb:
+        return worker.rembg(img.convert("RGB"))
+    return img.convert("RGB")
+
+
+def _run_hyface(job_id):
+    """Per-face AI paint (Hunyuan). Each face is painted INDEPENDENTLY with its own
+    uploaded reference via single-view Hunyuan paint, then all views bake into one shared
+    UV texture (cosine-blend + inpaint). Cardinal faces with no upload are filled by
+    gpt-image-2 from their geometry + the other references (when OPENAI_API_KEY is set).
+    Down-weighted FILL views add depth coverage: tilted cardinals (elev +/-) and gpt-synth
+    3/4 corners reach the oblique/recessed texels the head-on cardinal views only graze
+    (otherwise masked -> inpainted -> look unpainted). Albedo-only matte. Additive: leaves
+    every other texture mode untouched. Fill set tunable via HYFACE_* env vars."""
+    job = JOBS[job_id]
+    worker = _ensure_model()
+    rb = job["params"]["remove_background"]
+    _set(job_id, status="processing_texture", progress=66, message="Preparing per-face references")
+
+    # Per-face uploads: view_paths {angle: path} (front = main image + back/left/right/top/bottom).
+    face_refs = {}
+    for angle, p in (job.get("view_paths") or {}).items():
+        if angle == "front" or worker.PROJECTION_CAMS.get(angle) is None or not (p and os.path.exists(p)):
+            continue
+        face_refs[angle] = _prep_face_ref(worker, Image.open(p), rb)
+
+    # Front face reference, in priority order:
+    #   1) an explicit Front-slot upload (view_paths["front"] saved as *_view_front, i.e.
+    #      different from the shape source) — what the user provided for the front;
+    #   2) the clean bg-removed front saved at shape gen (processed_image_path), like the
+    #      default hunyuan mode;
+    #   3) the raw main shape image (source_paths[0]).
+    # The per-side loop above skips "front" so this block fully controls it.
+    _src0 = (job.get("source_paths") or [None])[0]
+    _vp_front = (job.get("view_paths") or {}).get("front")
+    if _vp_front and _vp_front != _src0 and os.path.exists(_vp_front):
+        face_refs["front"] = _prep_face_ref(worker, Image.open(_vp_front), rb)
+    else:
+        _front = job.get("processed_image_path")
+        if _front and os.path.exists(_front):
+            face_refs["front"] = Image.open(_front).convert("RGBA")
+        elif _src0 and os.path.exists(_src0):
+            face_refs["front"] = _prep_face_ref(worker, Image.open(_src0), rb)
+
+    # Target face set = uploaded faces + requested canonical faces (default gpt_angles).
+    requested = [a for a in (job.get("gpt_angles") or HYFACE_FACES) if worker.PROJECTION_CAMS.get(a)]
+    target_faces = sorted(set(face_refs) | set(requested), key=HYFACE_FACES.index)
+
+    # gpt-image-2 fills faces with no upload, from their geometry + the uploaded refs.
+    empty = [a for a in target_faces if a not in face_refs]
+    other_refs = list(face_refs.values())
+    if empty and os.environ.get("OPENAI_API_KEY") and other_refs:
+        _set(job_id, status="processing_texture", progress=72, message="Capturing geometry for empty faces")
+        geom = worker.render_view_geometry(shape_glb_path=job["shape_path"], angles=empty)
+        for angle in empty:
+            if angle not in geom:
+                continue
+            try:
+                _set(job_id, message=f"Synthesizing {angle} reference with {OPENAI_IMAGE_MODEL}")
+                painted = _openai_paint_view(geom[angle], other_refs, angle)
+                painted.save(OUTPUT_DIR / f"{job_id}_hyfaceref_{angle}.png")
+                # Style reference only (fed back into Hunyuan paint), so no bake flip.
+                face_refs[angle] = _prep_view(worker, painted, remove_bg=True, flip=False)
+            except Exception as e:  # noqa: BLE001
+                print(f"[server] hyface ref synth failed for {angle}: {e}")
+
+    if not face_refs:
+        raise RuntimeError("No face references — upload at least one side, or set OPENAI_API_KEY to synthesize them")
+
+    # Cardinal faces head-on; FRONT gets a higher weight so it owns shared front-lot faces (props in
+    # true per-object colours) instead of a side view repainting the neighbour car its own colour.
+    # `view_labels` (parallel to view_specs) names the views whose painted albedo we save for the
+    # single-winner blender re-bake; tilt fills are unlabelled (they only help the cosine base).
+    view_specs, view_labels = [], []
+    for a, img in face_refs.items():
+        if not worker.PROJECTION_CAMS.get(a):
+            continue
+        view_specs.append((img, worker.PROJECTION_CAMS[a][0], worker.PROJECTION_CAMS[a][1],
+                           _HYFACE_FRONT_WEIGHT if a == "front" else 1.0))
+        view_labels.append(a)
+
+    # Tilted cardinal fills: each equatorial face also painted at elev +/-tilt (same azimuth,
+    # same reference) so coverage extends into oblique surfaces above/below the equator.
+    if _HYFACE_TILT:
+        for a in HYFACE_TILT_FACES:
+            if a not in face_refs:
+                continue
+            _e, _az = worker.PROJECTION_CAMS[a]
+            for _dt in (_HYFACE_TILT_ELEV, -_HYFACE_TILT_ELEV):
+                view_specs.append((face_refs[a], _e + _dt, _az, _HYFACE_FILL_WEIGHT))
+                view_labels.append(None)
+
+    # Corner fills (3/4 diagonals, tilted down to reach diagonal/recessed texels no cardinal
+    # view sees head-on). Reference per corner, in priority order:
+    #   1) an explicit corner upload (view_paths[lbl], the fl/fr/bl/br slots) — used directly;
+    #   2) gpt-synth from the corner geometry render + adjacent faces (needs OPENAI_API_KEY).
+    if _HYFACE_CORNERS:
+        corner_refs = {}
+        vp = job.get("view_paths") or {}
+        for lbl in HYFACE_CORNER_CAMS:
+            p = vp.get(lbl)
+            if p and os.path.exists(p):
+                corner_refs[lbl] = _prep_face_ref(worker, Image.open(p), rb)
+
+        # gpt-synth only the corners the user didn't upload (and that have adjacent face refs).
+        to_synth = [lbl for lbl, (az, faces) in HYFACE_CORNER_CAMS.items()
+                    if lbl not in corner_refs and any(f in face_refs for f in faces)]
+        if to_synth and os.environ.get("OPENAI_API_KEY"):
+            cams = [(lbl, _HYFACE_CORNER_ELEV, HYFACE_CORNER_CAMS[lbl][0]) for lbl in to_synth]
+            _set(job_id, status="processing_texture", progress=78, message="Capturing corner geometry")
+            cgeom = worker.render_geometry_at(job["shape_path"], cams)
+            for lbl in to_synth:
+                if lbl not in cgeom:
+                    continue
+                _, faces = HYFACE_CORNER_CAMS[lbl]
+                adj = [face_refs[f] for f in faces if f in face_refs]
+                if not adj:
+                    continue
+                if "top" in face_refs:
+                    adj = adj + [face_refs["top"]]  # tilted-down corners also see the top
+                try:
+                    _set(job_id, message=f"Synthesizing {lbl} corner with {OPENAI_IMAGE_MODEL}")
+                    painted = _openai_paint_view(cgeom[lbl], adj, lbl)
+                    painted.save(OUTPUT_DIR / f"{job_id}_hyfaceref_{lbl}.png")
+                    corner_refs[lbl] = _prep_view(worker, painted, remove_bg=True, flip=False)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[server] hyface corner synth failed for {lbl}: {e}")
+
+        for lbl, cref in corner_refs.items():
+            view_labels.append(lbl)
+            az, _ = HYFACE_CORNER_CAMS[lbl]
+            view_specs.append((cref, _HYFACE_CORNER_ELEV, az, _HYFACE_FILL_WEIGHT))
+
+    _set(job_id, status="processing_texture", progress=84,
+         message=f"Hunyuan painting {len(view_specs)} views ({len(face_refs)} faces + fills)")
+    textured_path = worker.paint_faces(
+        uid=job_id, shape_glb_path=job["shape_path"], view_specs=view_specs,
+        bake_exp=_HYFACE_BAKE_EXP, tex_resolution=job["params"].get("tex_resolution"),
+        albedo_labels=view_labels if _HYFACE_BLENDER_BAKE else None,
+    )
+    # Single-winner re-bake: project the per-face Hunyuan albedos with the occlusion-aware blender baker
+    # (one view per face, no cross-object cosine blend), overlaying the Hunyuan cosine bake as the base
+    # so faces no view wins keep a sensible colour. Fixes the closely-spaced cars' flank colour wash.
+    if _HYFACE_BLENDER_BAKE:
+        try:
+            base_glb = OUTPUT_DIR / f"{job_id}_hycosine.glb"
+            shutil.copyfile(textured_path, base_glb)
+            elevations = {lbl: str(OUTPUT_DIR / f"{job_id}_hyalbedo_{lbl}.png")
+                          for lbl in view_labels
+                          if lbl in _HYFACE_BAKE_SIDES
+                          and (OUTPUT_DIR / f"{job_id}_hyalbedo_{lbl}.png").exists()}
+            if elevations:
+                _set(job_id, status="processing_texture", progress=92,
+                     message="Single-winner projection bake (Blender)")
+                textured_path = _blender_project_bake(job_id, job["shape_path"], elevations,
+                                                      base_glb=str(base_glb))
+        except Exception as e:  # noqa: BLE001
+            print(f"[server] hyface blender re-bake failed ({e}); keeping cosine bake")
+    _set(job_id, status="completed", progress=100, message="Done",
+         textured_path=textured_path, textured_url=f"/api/files/{Path(textured_path).name}")
+
+
+def _run_reface(job_id):
+    """Depth-aware single-face re-texture of an already-textured mesh. Generates the chosen
+    face via the gpt geomatch (the mvgpt 'gpt refine' generation from geometry + references),
+    then bakes ONLY the nearest depth band (foreground) over the existing texture — farther
+    surfaces are left as-is (a car in front of a wall: only the car is repainted)."""
+    job = JOBS[job_id]
+    worker = _ensure_model()
+    if not (os.environ.get("OPENAI_API_KEY") or os.environ.get("GEMINI_API_KEY")):
+        raise RuntimeError("reface needs OPENAI_API_KEY or GEMINI_API_KEY (.env / environment)")
+    textured_glb = job.get("reface_src_glb")
+    if not (textured_glb and os.path.exists(textured_glb)):
+        raise RuntimeError("reface: source textured mesh not found")
+    face = job.get("reface_face", "front")
+    # Resolve the view's camera: cardinal faces from PROJECTION_CAMS, 3/4 corners from the
+    # corner table (azimuth + the corner down-tilt elevation).
+    _cam = worker.PROJECTION_CAMS.get(face)
+    if _cam is not None:
+        elev, azim = float(_cam[0]), float(_cam[1])
+    elif face in HYFACE_CORNER_CAMS:
+        azim = float(HYFACE_CORNER_CAMS[face][0])
+        elev = float(_HYFACE_CORNER_ELEV)
+    else:
+        raise RuntimeError(f"reface: unknown view '{face}' (use front/back/left/right/top/bottom or fl/fr/bl/br)")
+    refs = _job_ref_images(worker, job, remove_bg=True)
+    if not refs:
+        raise RuntimeError("reface: no reference image provided")
+
+    _set(job_id, status="processing_texture", progress=70, message=f"Capturing {face} geometry")
+    geom = worker.render_geometry_at(textured_glb, [(face, elev, azim)])
+    if face not in geom:
+        raise RuntimeError(f"reface: could not render {face} geometry")
+
+    _set(job_id, status="processing_texture", progress=78, message=f"Generating improved {face} with {OPENAI_IMAGE_MODEL}")
+    painted = _openai_paint_view(geom[face], refs, face)
+    painted.save(OUTPUT_DIR / f"{job_id}_refaceview_{face}.png")
+
+    mask_img = None
+    _mp = job.get("reface_mask_path")
+    if _mp and os.path.exists(_mp):
+        mask_img = Image.open(_mp).convert("L")
+
+    _set(job_id, status="processing_texture", progress=88,
+         message=f"Depth-aware baking {face} (foreground only)")
+    textured_path = worker.reface(
+        uid=job_id, textured_glb_path=textured_glb, elev=elev, azim=azim, view_image=painted,
+        depth_band=_REFACE_DEPTH_BAND, mask=mask_img,
+    )
+    _set(job_id, status="completed", progress=100, message="Done",
+         textured_path=textured_path, textured_url=f"/api/files/{Path(textured_path).name}")
+
+
 def _run_texture(job_id):
     job = JOBS[job_id]
     mode = job.get("texture_mode")
@@ -572,6 +943,10 @@ def _run_texture(job_id):
         return _run_mvadapter(job_id)
     if mode == "mvgpt":
         return _run_mvgpt(job_id)
+    if mode == "hyface":
+        return _run_hyface(job_id)
+    if mode == "reface":
+        return _run_reface(job_id)
     worker = _ensure_model()
     _set(job_id, status="processing_texture", progress=70, message="Generating PBR texture")
     # Primary reference = the bg-removed front (reuse shape's processed image, or
@@ -664,27 +1039,167 @@ def _blender_convert(src_glb: str, out_path: str):
         raise HTTPException(status_code=500, detail=f"Blender conversion failed: {tail}")
 
 
-def _blender_project_bake(job_id, shape_glb, elevations):
-    """Project the side elevations onto the mesh and bake to a GLB via headless Blender
-    (camera-projection bake; standard conventions, uniform ortho scale). Returns GLB path."""
+def _blender_run(spec, job_id, tag, expect_done="BLENDER_PROJECT_DONE"):
     if not (shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)):
         raise RuntimeError("Blender is not installed in this container (BLENDER_BIN)")
+    spec_path = OUTPUT_DIR / f"{job_id}_{tag}_spec.json"
+    spec_path.write_text(json.dumps(spec))
+    cmd = [BLENDER_BIN, "--background", "--python", str(BLENDER_PROJECT_SCRIPT), "--", str(spec_path)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or expect_done not in out:
+        raise RuntimeError(f"Blender {tag} failed: {out[-3000:]}")
+    return proc
+
+
+def _blender_project_bake(job_id, shape_glb, elevations, base_glb=None):
+    """Project the side elevations onto the mesh and bake to a GLB via headless Blender
+    (camera-projection bake; standard conventions, uniform ortho scale). When `base_glb` is a
+    Hunyuan-PBR-textured GLB, the elevations overlay its base colour (Hunyuan albedo gap-fills
+    uncovered faces) and its metallic/roughness are kept. Returns the GLB path."""
     out_glb = str(OUTPUT_DIR / f"{job_id}_textured.glb")
     spec = {
         "mesh": os.path.abspath(shape_glb),
         "out": os.path.abspath(out_glb),
         "tex_size": int(os.environ.get("MVGPT_BLENDER_TEX", "2048")),
+        # Min head-on dot for a face to take a cardinal elevation; faces below this (grazing, diagonal
+        # corners/bevels, undersides) fall back to the Hunyuan PBR paint instead of a stretched
+        # elevation. 0.5 (~60deg) keeps only reasonably head-on faces on the cardinal views now that
+        # the 3/4 corner views are off, so the corners/diagonals are painted by Hunyuan.
+        "face_dot": float(os.environ.get("MVGPT_FACE_DOT", "0.5")),
         "views": [{"side": s, "image": os.path.abspath(p)} for s, p in elevations.items()],
         "debug_dir": str(OUTPUT_DIR),  # writes blenderproj_cam_<side>.png for verification
     }
-    spec_path = OUTPUT_DIR / f"{job_id}_blenderproj_spec.json"
-    spec_path.write_text(json.dumps(spec))
-    cmd = [BLENDER_BIN, "--background", "--python", str(BLENDER_PROJECT_SCRIPT), "--", str(spec_path)]
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
-    if proc.returncode != 0 or not os.path.exists(out_glb):
-        tail = (proc.stderr or proc.stdout or "")[-3000:]
-        raise RuntimeError(f"Blender projection bake failed: {tail}")
+    if base_glb:
+        spec["base_glb"] = os.path.abspath(base_glb)
+    _blender_run(spec, job_id, "blenderproj", "BLENDER_PROJECT_DONE")
+    if not os.path.exists(out_glb):
+        raise RuntimeError("Blender projection produced no GLB")
     return out_glb
+
+
+def _blender_geometry(job_id, shape_glb, sides):
+    """Render a flat grey shaded view of the mesh from each side camera (for gpt geometry-
+    match). Returns {side: png_path}."""
+    spec = {
+        "mode": "geometry",
+        "mesh": os.path.abspath(shape_glb),
+        "uid": job_id,
+        "geom_dir": str(OUTPUT_DIR),
+        "geo_size": int(os.environ.get("MVGPT_GEO_SIZE", "1024")),
+        "views": [{"side": s} for s in sides],
+    }
+    _blender_run(spec, job_id, "blendergeom", "BLENDER_GEOMETRY_DONE")
+    out = {}
+    for s in sides:
+        p = OUTPUT_DIR / f"{job_id}_geom_{s}.png"
+        if p.exists():
+            out[s] = str(p)
+    return out
+
+
+def _geomatch_elevations(job_id, elevations, geom):
+    """Colourise each side's grey geometry render with the matching reference elevation via
+    gpt-image: the grey render is the layout/geometry ground truth (every element where the mesh
+    has it) and the elevation is the colour source. Returns {side: adapted_png_path}; falls back to
+    the original elevation on any per-side failure.
+
+    NOTE: a SHORT literal prompt is deliberate. Verbose "match this silhouette exactly / reproduce
+    every element" prompts make gpt-image reproduce the REFERENCE's layout (plants drift to corners,
+    nothing fits); a plain "colourise this grey image" keeps the geom's structure and only applies
+    the reference's colours. Verified against the user's manual ChatGPT result."""
+    out = {}
+    for side, elev_path in elevations.items():
+        g = geom.get(side)
+        out[side] = _colorize_geom(job_id, g, elev_path, side) if g else elev_path
+    return out
+
+
+def _colorize_geom(job_id, geom_path, ref_path, side):
+    """Colourise one grey geom render with a colour reference via gpt-image (literal prompt).
+    Returns the saved path, or the reference path on failure. Shared by cardinal geomatch and the
+    3/4 corner views (which use the 3/4 source as their reference)."""
+    from webapp.image_edit import edit_image
+    from PIL import Image as _I
+    try:
+        res = edit_image([_I.open(geom_path).convert("RGB"), _I.open(ref_path).convert("RGB")],
+                         "Colorize the grayscale image using the reference (colored image). Keep the grayscale proportions, shape, components and silhouette EXACTLY as-is, only apply the colors without shadows, do not change composition, props, orientation or any geometry present on the grayscale image. Map the colors from the reference onto the grayscale image, but do not alter the structure or layout of the grayscale image. The output should be a colorized version of the grayscale image that follows exactly the color scheme of the reference image while preserving all details and geometry of the original grayscale image. Match elements from the reference to the grayscale image based on their position and shape to colorize appropriately, but do not move or resize anything. ",
+                         size=(1024, 1024), prefer="gemini")  # Gemini keeps proportions; gpt-image drifts/enlarges
+        mp = OUTPUT_DIR / f"{job_id}_elevmatched_{side}.png"
+        res.save(mp)
+        return str(mp)
+    except Exception as e:  # noqa: BLE001
+        print(f"[server] colorize failed for {side}: {e}; using reference")
+        return ref_path
+
+
+def _corner_view(job_id, side, source, orig_elevations, geom_path):
+    """3/4 corner texture: gpt-image GENERATES the corner view from the 3/4 source + the corner's
+    two adjacent face elevations (its visible sides), then Gemini TRANSFERS that onto the corner
+    geom render (Gemini keeps proportions). Falls back to a plain Gemini colourise from the source."""
+    from webapp.gen_transfer import ADJ, gen_view_paths
+    try:
+        faces = ADJ.get(side, [])
+        ref_paths = [orig_elevations[f] for f in faces
+                     if orig_elevations.get(f) and os.path.exists(orig_elevations[f])]
+        gv = gen_view_paths(side, ref_paths, geom_path)  # gpt-gen from the corner GEOMETRY + face refs
+        gp = OUTPUT_DIR / f"{job_id}_genview_{side}.png"
+        gv.save(gp)
+        return _colorize_geom(job_id, geom_path, str(gp), side)
+    except Exception as e:  # noqa: BLE001
+        print(f"[server] corner {side} gen-transfer failed ({e}); colourising from source")
+        return _colorize_geom(job_id, geom_path, source, side)
+
+
+def _view_texture(job_id, side, ref_paths, geom_path, consistency_refs=None,
+                  style_gv=None, style_elev=None):
+    """Unified per-view texture for EVERY face (cardinal, 3/4 corner, bottom).
+    Stage 1 (gpt-image): GENERATE the view from the grey geometry render (sole authority for what
+    exists + proportions) coloured from the view's face refs; `consistency_refs` (other faces) keep
+    shared objects consistent. Stage 2 (Gemini): TRANSFER that onto the geom, locking proportions, in
+    a consistent flat 3D-cartoon look. `style_gv`/`style_elev` are previously generated genview/
+    elevmatched paths used as STYLE ANCHORS so all faces share one art style. Returns the elevmatched
+    path."""
+    from webapp.gen_transfer import gen_view_paths, transfer
+    from PIL import Image as _I
+    gv = None
+    try:
+        gv = gen_view_paths(side, ref_paths, geom_path, consistency_refs=consistency_refs,
+                            style_anchors=style_gv)
+        gv.save(OUTPUT_DIR / f"{job_id}_genview_{side}.png")
+    except Exception as e:  # noqa: BLE001
+        print(f"[server] genview {side} failed ({e}); transferring from refs")
+    try:
+        # genview -> geom recolour. No style anchor here: the genview is already style-consistent
+        # (style_gv anchors the genview stage), and a cross-face anchor in the transfer bleeds the
+        # wrong face's content/shape into the result (a side view picking up the front emblem).
+        src = gv if gv is not None else _I.open(ref_paths[0]).convert("RGB")
+        res = transfer(geom_path, src)
+        mp = OUTPUT_DIR / f"{job_id}_elevmatched_{side}.png"
+        res.save(mp)
+        return str(mp)
+    except Exception as e:  # noqa: BLE001
+        print(f"[server] view-texture {side} failed ({e})")
+        if gv is not None:
+            return str(OUTPUT_DIR / f"{job_id}_genview_{side}.png")
+        return ref_paths[0] if ref_paths else geom_path
+
+
+def _hunyuan_pbr_base(job_id, shape_glb, cond_path, params):
+    """Paint a Hunyuan PBR base (albedo + metallic/roughness) to overlay elevations onto.
+    Conditions on the clean front elevation (or source). Returns the base GLB path."""
+    worker = _ensure_model()
+    cond = Image.open(cond_path).convert("RGBA")
+    if params.get("remove_background", True):
+        try:
+            cond = worker.rembg(cond.convert("RGB"))
+        except Exception:  # noqa: BLE001
+            pass
+    return worker.generate_texture(
+        uid=f"{job_id}_pbrbase", shape_glb_path=shape_glb, images=[cond],
+        face_count=params.get("face_count", 40000), views=params.get("views"),
+        tex_resolution=params.get("tex_resolution"), albedo_only=False,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -745,11 +1260,16 @@ async def generate(
     ai_fill_angles: str = Form(""),       # projection: comma-sep angles to synth from front via OpenAI
     gpt_angles: str = Form("front,back,left,right,top"),  # gptproject: comma-sep canonical angles to paint
     mv_viewset: str = Form("canonical"),  # mvadapter/mvgpt: canonical | corners | tilted
+    front: UploadFile = File(None),       # hyface: explicit front-face reference (else the main image)
     back: UploadFile = File(None),
     left: UploadFile = File(None),
     right: UploadFile = File(None),
     top: UploadFile = File(None),
     bottom: UploadFile = File(None),
+    fl: UploadFile = File(None),          # hyface: 3/4 corner references (front-left/-right, back-left/-right)
+    fr: UploadFile = File(None),
+    bl: UploadFile = File(None),
+    br: UploadFile = File(None),
     reference: list[UploadFile] = File(None),  # gpt/mvgpt: optional style reference image(s)
     reference_side: list[str] = Form(None),    # per-reference side tag, parallel to `reference`
 ):
@@ -770,9 +1290,12 @@ async def generate(
 
     source_paths = [await _save(up, f"source{idx}") for idx, up in enumerate(images)]
 
-    # Per-angle photos for projection texturing (front = the main image).
+    # Per-angle photos for projection texturing (front defaults to the main image; an
+    # explicit `front` upload — the hyface Front slot — overrides it). fl/fr/bl/br are
+    # optional hyface 3/4-corner references.
     view_paths = {"front": source_paths[0]}
-    for angle, up in (("back", back), ("left", left), ("right", right), ("top", top), ("bottom", bottom)):
+    for angle, up in (("front", front), ("back", back), ("left", left), ("right", right), ("top", top), ("bottom", bottom),
+                      ("fl", fl), ("fr", fr), ("bl", bl), ("br", br)):
         if up is not None:
             view_paths[angle] = await _save(up, f"view_{angle}")
 
@@ -830,6 +1353,7 @@ async def request_texture(
     gpt_angles: str = Form(None),
     mv_viewset: str = Form(None),
     remove_background: bool = Form(None),
+    front: UploadFile = File(None),       # hyface: explicit front-face reference (else the main image)
     reference: list[UploadFile] = File(None),
     reference_side: list[str] = Form(None),
 ):
@@ -850,6 +1374,12 @@ async def request_texture(
         job["mv_viewset"] = mv_viewset
     if remove_background is not None:
         job["params"]["remove_background"] = bool(remove_background)
+    # Explicit front-face reference (hyface Front slot) overrides the stored front.
+    if front is not None and getattr(front, "filename", ""):
+        raw = await front.read()
+        fpath = OUTPUT_DIR / f"{job_id}_view_front.png"
+        Image.open(io.BytesIO(raw)).convert("RGBA").save(fpath)
+        job["view_paths"] = {**(job.get("view_paths") or {}), "front": str(fpath)}
     new_refs = []
     new_sides = []
     _rsides = reference_side or []
@@ -955,11 +1485,16 @@ async def retexture(
     views: int = Form(7),
     tex_resolution: int = Form(512),
     albedo_only: bool = Form(False),
+    front: UploadFile = File(None),       # hyface: explicit front-face reference (else the main image)
     back: UploadFile = File(None),
     left: UploadFile = File(None),
     right: UploadFile = File(None),
     top: UploadFile = File(None),
     bottom: UploadFile = File(None),
+    fl: UploadFile = File(None),          # hyface: 3/4 corner references
+    fr: UploadFile = File(None),
+    bl: UploadFile = File(None),
+    br: UploadFile = File(None),
     reference: list[UploadFile] = File(None),
     reference_side: list[str] = Form(None),
 ):
@@ -985,7 +1520,8 @@ async def retexture(
 
     source_paths = [await _save(up, f"source{idx}") for idx, up in enumerate(images)]
     view_paths = {"front": source_paths[0]}
-    for angle, up in (("back", back), ("left", left), ("right", right), ("top", top), ("bottom", bottom)):
+    for angle, up in (("front", front), ("back", back), ("left", left), ("right", right), ("top", top), ("bottom", bottom),
+                      ("fl", fl), ("fr", fr), ("bl", bl), ("br", br)):
         if up is not None:
             view_paths[angle] = await _save(up, f"view_{angle}")
 
@@ -1014,6 +1550,61 @@ async def retexture(
             "face_count": int(face_count), "views": int(views), "tex_resolution": int(tex_resolution),
             "albedo_only": bool(albedo_only),
         },
+    }
+    with JOBS_LOCK:
+        JOBS[job_id] = job
+    WORK.put(("texture", job_id))
+    return {"id": job_id}
+
+
+@app.post("/api/reface")
+async def reface(
+    source_id: str = Form(...),
+    face: str = Form("front"),
+    remove_background: bool = Form(True),
+    reference: list[UploadFile] = File(None),
+    reference_side: list[str] = Form(None),
+    mask: UploadFile = File(None),
+):
+    """Depth-aware single-face re-texture of an already-textured model. Repaints only the
+    nearest depth band (foreground) of `face`, leaving farther surfaces as-is."""
+    if not UUID_RE.match(source_id):
+        raise HTTPException(status_code=400, detail="Bad source id")
+    src_tex = OUTPUT_DIR / f"{source_id}_textured.glb"
+    if not src_tex.exists():
+        raise HTTPException(status_code=404, detail="No textured mesh for that model (reface needs a textured model)")
+
+    job_id = str(uuid.uuid4())
+
+    async def _save(up, name):
+        raw = await up.read()
+        try:
+            Image.open(io.BytesIO(raw)).verify()
+        except Exception:
+            raise HTTPException(status_code=400, detail=f"Invalid image file: {up.filename}")
+        path = OUTPUT_DIR / f"{job_id}_{name}.png"
+        Image.open(io.BytesIO(raw)).convert("RGBA").save(path)
+        return str(path)
+
+    reference_paths = []
+    reference_sides = []
+    _rsides = reference_side or []
+    for idx, up in enumerate(reference or []):
+        if up is not None and getattr(up, "filename", ""):
+            reference_paths.append(await _save(up, f"reference{idx}"))
+            reference_sides.append((_rsides[idx].strip().lower() if idx < len(_rsides) and _rsides[idx] else "any"))
+    if not reference_paths:
+        raise HTTPException(status_code=400, detail="reface needs at least one reference image")
+
+    mask_path = await _save(mask, "reface_mask") if (mask is not None and getattr(mask, "filename", "")) else None
+
+    job = {
+        "id": job_id, "status": "queued_texture", "progress": 60, "message": "Queued (reface)",
+        "error": None, "shape_url": None, "textured_url": None, "auto_texture": False,
+        "texture_mode": "reface", "reface_src_glb": str(src_tex), "reface_face": face.strip().lower(),
+        "reface_mask_path": mask_path, "reference_paths": reference_paths, "reference_sides": reference_sides,
+        "source_paths": [], "view_paths": {}, "created_at": time.time(),
+        "params": {"remove_background": bool(remove_background)},
     }
     with JOBS_LOCK:
         JOBS[job_id] = job

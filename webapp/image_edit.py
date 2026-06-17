@@ -16,11 +16,11 @@ import os
 # Shared style directive: keep textures flat/cartoonish, not photoreal. Appended to the
 # gptproject + mvgpt refine prompts (both providers otherwise drift toward realism).
 CARTOON_STYLE = (
-    "ART STYLE (mandatory): stylised, cartoonish, hand-painted low-poly game asset — flat, "
+    "ART STYLE (mandatory): stylised, cartoonish, hand-painted low-poly, 3D game asset — flat, "
     "clean, slightly saturated colours, soft simple shading, crisp readable shapes. NOT "
     "photorealistic: no realistic reflections or specular highlights, no PBR or photographic "
-    "surface detail, no realistic grime, dirt or weathering, no dramatic or realistic lighting, "
-    "no depth-of-field. When borrowing style from the reference image(s), keep this flat cartoon "
+    "surface detail, no realistic grime, dirt or weathering, no dramatic lighting. "
+    "When borrowing style from the reference image(s), keep this flat 3D cartoon "
     "look. Think mobile/stylised game prop, not a photo."
 )
 
@@ -36,22 +36,26 @@ CONSISTENCY_RULE = (
 )
 
 
-def _png_buf(img, name, size):
+def _png_buf(img, name, size, mode="RGB"):
     b = io.BytesIO()
-    img.convert("RGB").resize(size).save(b, format="PNG")
+    img.convert(mode).resize(size).save(b, format="PNG")
     b.seek(0)
     b.name = name
     return b
 
 
-def _openai_edit(images, prompt, size):
+def _openai_edit(images, prompt, size, mask=None):
     from openai import OpenAI
     from PIL import Image
 
     client = OpenAI()
     model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
     bufs = [_png_buf(im, f"img{i}.png", size) for i, im in enumerate(images)]
-    res = client.images.edit(model=model, image=bufs, prompt=prompt, size=f"{size[0]}x{size[1]}", n=1)
+    kw = {}
+    if mask is not None:
+        # RGBA mask: transparent (alpha 0) = region gpt may paint; opaque = keep image[0].
+        kw["mask"] = _png_buf(mask, "mask.png", size, mode="RGBA")
+    res = client.images.edit(model=model, image=bufs, prompt=prompt, size=f"{size[0]}x{size[1]}", n=1, **kw)
     return Image.open(io.BytesIO(base64.b64decode(res.data[0].b64_json))).convert("RGB")
 
 
@@ -76,21 +80,28 @@ def _gemini_edit(images, prompt, size):
     raise RuntimeError("gemini returned no image part")
 
 
-def edit_image(images, prompt, size=(1024, 1024)):
-    """Refine images[0] (style from images[1:]) with provider fallback. Returns PIL RGB."""
+def edit_image(images, prompt, size=(1024, 1024), mask=None, prefer="openai"):
+    """Refine images[0] (style from images[1:]) with provider fallback. Returns PIL RGB.
+    `mask` (PIL RGBA): transparent areas are the only region gpt-image may paint (OpenAI edit
+    mask); used to confine output to the object's silhouette. Gemini has no mask API.
+    `prefer`: which provider to try FIRST ("openai" or "gemini"). For COLOURISING a geometry
+    render, prefer="gemini" — Gemini keeps the input's exact proportions/layout, whereas gpt-image
+    drifts (enlarges/reframes), which mis-scales the projected texture."""
     if isinstance(size, int):
         size = (size, size)
     errors = []
-    if os.environ.get("OPENAI_API_KEY"):
-        try:
-            return _openai_edit(images, prompt, size)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"gpt-image-2: {e}")
-    if os.environ.get("GEMINI_API_KEY"):
-        try:
-            return _gemini_edit(images, prompt, size)
-        except Exception as e:  # noqa: BLE001
-            errors.append(f"gemini-nano-banana: {e}")
+    order = ["gemini", "openai"] if prefer == "gemini" else ["openai", "gemini"]
+    for prov in order:
+        if prov == "openai" and os.environ.get("OPENAI_API_KEY"):
+            try:
+                return _openai_edit(images, prompt, size, mask=mask)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"gpt-image-2: {e}")
+        if prov == "gemini" and os.environ.get("GEMINI_API_KEY"):
+            try:
+                return _gemini_edit(images, prompt, size)
+            except Exception as e:  # noqa: BLE001
+                errors.append(f"gemini-nano-banana: {e}")
     if errors:
         raise RuntimeError("image edit failed (" + " | ".join(errors) + ")")
     raise RuntimeError("no image API key set (OPENAI_API_KEY or GEMINI_API_KEY)")

@@ -43,18 +43,21 @@ def _angle_label(az, el):
 
 def _view_sides(az, el):
     """Side tag(s) a given camera view depicts, in priority order. Cardinal views map to
-    one side; 3/4 corners map to their two adjacent sides; tilted views still resolve by
-    azimuth. Used to pick which side-tagged reference(s) feed each view's refine."""
+    one side; 3/4 corners map to their own corner tag (fl/fr/bl/br) FIRST, then their two
+    adjacent cardinals as fallback; tilted views still resolve by azimuth. Used to pick which
+    side-tagged reference(s) feed each view's refine."""
     if el is not None and el >= 60:
         return ["top"]
     if el is not None and el <= -60:
         return ["bottom"]
     cards = {0: "front", 90: "right", 180: "back", 270: "left"}
+    corners = {45: "fr", 135: "br", 225: "bl", 315: "fl"}  # MV-Adapter azimuth convention
     a = az % 360
     order = sorted(cards, key=lambda k: min(abs(a - k), 360 - abs(a - k)))
     d0 = min(abs(a - order[0]), 360 - abs(a - order[0]))
-    if 25 <= d0 <= 65:  # 3/4 corner: between two cardinals -> feed both
-        return [cards[order[0]], cards[order[1]]]
+    if 25 <= d0 <= 65:  # 3/4 corner: own tag first, then both adjacent cardinals as fallback
+        ckey = min(corners, key=lambda k: min(abs(a - k), 360 - abs(a - k)))
+        return [corners[ckey], cards[order[0]], cards[order[1]]]
     return [cards[order[0]]]
 
 
@@ -92,13 +95,20 @@ def _gpt_refine_views(views, ref_paths, save_dir, save_name, azimuths=None, elev
         (any_refs if s in ("", "any") else tagged.setdefault(s, [])).append(img)
     has_tags = bool(tagged)
 
+    _CORNER_TAGS = ("fl", "fr", "bl", "br")
+
     def _refs_for(i):
         if not has_tags:
             return refs  # legacy: no side tags -> feed all references to every view
         want = _view_sides(azimuths[i], elevations[i]) if (azimuths and i < len(azimuths)) else ["front"]
         matched = []
         for w in want:
-            matched += tagged.get(w, [])
+            got = tagged.get(w, [])
+            # an explicit corner-tagged reference (want[0] for a 3/4 view) wins outright, so the
+            # corner view isn't diluted by both adjacent cardinal references.
+            if got and w in _CORNER_TAGS:
+                return got
+            matched += got
         # "Only feed that": when this view HAS a matching-side reference, feed ONLY those
         # (avoids blending heterogeneous side views into a generic, element-losing result).
         if matched:
