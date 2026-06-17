@@ -34,20 +34,37 @@
   of a wall → only the car changes). View can be any of the 6 cardinal faces or the 4 3/4
   corners (fl/fr/bl/br); corners resolve to the corner camera (azimuth + `HYFACE_CORNER_ELEV`).
   - `webapp/pipeline.py`: `TextureWorker.reface` — loads the mesh preserving its existing UVs +
-    texture (the base), computes screen-space depth (`render_position` + `render_alpha`, camera
-    pos = `-Rᵀt` from the view matrix, euclidean), builds a foreground mask (nearest depth band
-    or a user mask), bakes the generated face as RGBA so `back_project` carries the mask in its
-    alpha, and composites foreground texels over the base. Albedo-only matte output.
-  - `webapp/server.py`: `_run_reface` (generates the face via the gpt geomatch — the mvgpt
-    "gpt refine" generation — from references) + `/api/reface` endpoint + dispatch in
-    `_run_texture`. Foreground band tunable via `REFACE_DEPTH_BAND` (default 0.35); optional
-    upload mask overrides it.
+    texture (the base), computes screen-space depth (`render_position` decoded back to world,
+    camera pos = `-Rᵀt` from the view matrix, euclidean), builds a foreground mask (nearest depth
+    band or a user mask), GEOMETRY-MATCHES the generated view to the mesh silhouette
+    (`_align_photo` + `_silhouette_bbox`, same as projection/gptproject — so scale + position
+    follow the geometry, not gpt's drift), bakes it as RGBA so `back_project` carries the mask in
+    its alpha, and composites foreground texels over the base. Albedo-only matte output.
+  - `webapp/server.py`: `_run_reface` generates the face via the MV+GPT per-face workflow —
+    gpt generates from a grey geometry render + references, then Gemini transfers it onto the
+    geom to lock proportions/position (`_view_texture`/`gen_transfer`), so the result is
+    geometry-locked, not gpt-drifted. The grey geom is rendered from the Hunyuan camera
+    (`TextureWorker.render_geom_shaded`) so the locked output aligns to reface's bake. Plus the
+    `/api/reface` endpoint + dispatch in `_run_texture`. Foreground band tunable via
+    `REFACE_DEPTH_BAND` (default 0.35); optional upload mask overrides it.
   - `webapp/static/index.html` + `app.js`: mode option, reface panel (face selector + optional
     mask), references via the existing reference panel, `texBtn` → `/api/reface` on an existing
     textured model.
   - Note: output is matte (existing metallic/roughness is not reloaded from the GLB).
 
 ### Changed
+- MV+GPT (`mvgpt`) blender path is now resumable and parallel:
+  - Resume: `MVGPT_REUSE` (default on) reuses any per-side artifact already on disk —
+    elevations (`generate_elevations`), grey geometry renders (`_blender_geometry`), per-side
+    genview/elevmatched (`_view_texture`), and the Hunyuan PBR base (`_hunyuan_pbr_base`) — so a
+    re-queued job finishes only the missing sides + the final bake. Set `MVGPT_REUSE=0` to force
+    a clean regen.
+  - `POST /api/jobs/{id}/resume` rebuilds an interrupted mvgpt job from its on-disk artifacts
+    (same id) and re-queues it. Side tags aren't persisted, but each side is re-derived from the
+    existing elevations, so resume doesn't need them.
+  - Parallel genviews: the per-side geomatch generation now runs `front` first (the style anchor)
+    then fans the remaining sides out concurrently (`MVGPT_GENVIEW_WORKERS`, default 4) instead of
+    one-at-a-time. Each genview is a network-bound gpt/gemini call, so wall time drops ~Nx.
 - MV-Adapter + GPT refine (`mvgpt`) and `mvadapter`: references can now be tagged with a
   3/4-corner side (`fl`/`fr`/`bl`/`br`) in the reference panel, not just cardinal faces.
   - Blender elevation path (default mvgpt): a corner-tagged reference is used as the colour

@@ -77,7 +77,7 @@ def _silhouette_bbox(normal_img, size):
     return (int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1)
 
 
-def _align_photo(rgba, mesh_bbox, size, fit="fill", mirror=False):
+def _align_photo(rgba, mesh_bbox, size, fit="fill", mirror=False, with_alpha=False):
     """Place a photo's subject (from its alpha) onto the mesh silhouette bbox.
 
     fit="fill" (default): map the subject's bbox exactly onto the mesh's projected
@@ -88,6 +88,9 @@ def _align_photo(rgba, mesh_bbox, size, fit="fill", mirror=False):
     mirror=True: horizontally flip the subject content before placing. The renderer's
     back-projection bakes views horizontally mirrored vs a normal photo, so flipping
     the source un-mirrors the result (the face/azimuth is unchanged — only content).
+    with_alpha=True: return an RGBA canvas whose alpha is the subject's coverage (0 where
+    the subject does not paint) so the caller can bake ONLY where the subject covers,
+    instead of letting the white background canvas leak into the bake.
     """
     from PIL import Image
 
@@ -106,9 +109,97 @@ def _align_photo(rgba, mesh_bbox, size, fit="fill", mirror=False):
     else:  # fill — subject bbox -> silhouette bbox in both axes
         nw, nh = tw, th
     subject = subject.resize((nw, nh))
+    pos = (mx0 + (tw - nw) // 2, my0 + (th - nh) // 2)
+    sub_alpha = subject.getchannel("A")
+    if with_alpha:
+        canvas = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+        canvas.paste(subject, pos, sub_alpha)
+        return canvas
     canvas = Image.new("RGB", (size, size), (255, 255, 255))
-    canvas.paste(subject.convert("RGB"), (mx0 + (tw - nw) // 2, my0 + (th - nh) // 2), subject.getchannel("A"))
+    canvas.paste(subject.convert("RGB"), pos, sub_alpha)
     return canvas
+
+
+def _best_silhouette_fit(moving, target, size):
+    """Refine a roughly-aligned mask onto the TRUE mesh silhouette with a small per-axis scale
+    (about the silhouette centroid) + translation that maximises IoU. Returns a 2x3 affine, or
+    None when the identity is already best. The returned affine is in `size`-space, so it applies
+    directly to the full-resolution aligned image.
+
+    `_align_photo` fits the painted subject's bbox to the silhouette bbox, but the generator
+    (gpt/gemini) reframes the asset (~1.4x zoom + a few % aspect change it cannot pixel-lock) and
+    thin outliers like trees skew the painted bbox, so that fit leaves a residual global scale/
+    offset — the "close but not exact" drift. This mops it up. Monotonic: seeded at the identity
+    IoU, it only takes a better fit, so an already-aligned view (e.g. the 3/4 corners) is a no-op
+    and never degraded."""
+    import cv2
+    import numpy as np
+
+    # Search at a fixed low resolution so cost is independent of the render/texture size; the
+    # per-axis scale is resolution-free and translations scale linearly back to `size`-space.
+    S = 256 if size > 256 else size
+    k = size / S
+    tgt = cv2.resize(target.astype(np.uint8), (S, S), interpolation=cv2.INTER_NEAREST) > 0
+    mov = cv2.resize(moving.astype(np.uint8), (S, S), interpolation=cv2.INTER_NEAREST)
+    ys, xs = np.where(tgt)
+    if xs.size == 0 or not mov.any():
+        return None
+    cx = float(xs.min() + xs.max()) / 2.0
+    cy = float(ys.min() + ys.max()) / 2.0
+
+    def _iou(a):
+        uni = np.logical_or(a, tgt).sum()
+        return np.logical_and(a, tgt).sum() / uni if uni else 0.0
+
+    best_v = _iou(mov > 0)
+    best = None
+    shifts = (-8, -4, 0, 4, 8)
+    for ax in np.linspace(0.92, 1.08, 9):
+        for ay in np.linspace(0.92, 1.08, 9):
+            for dx in shifts:
+                for dy in shifts:
+                    M = np.array([[ax, 0.0, cx - cx * ax + dx],
+                                  [0.0, ay, cy - cy * ay + dy]], np.float32)
+                    w = cv2.warpAffine(mov, M, (S, S), flags=cv2.INTER_NEAREST) > 0
+                    v = _iou(w)
+                    if v > best_v:
+                        best_v = v
+                        best = (ax, ay, dx, dy)
+    if best is None:
+        return None
+    ax, ay, dx, dy = best
+    cxf, cyf = cx * k, cy * k
+    return np.array([[ax, 0.0, cxf - cxf * ax + dx * k],
+                     [0.0, ay, cyf - cyf * ay + dy * k]], np.float32)
+
+
+def _extract_base_texture(mesh, glb_path):
+    """Pull the base-color texture image out of a textured mesh/GLB. The renderer's load_mesh
+    reads UVs but hardcodes texture_data=None, so reface must seed the existing texture itself.
+    Returns a PIL image or None."""
+    import trimesh
+
+    def _from(visual):
+        mat = getattr(visual, "material", None)
+        if mat is None:
+            return None
+        for attr in ("baseColorTexture", "image"):
+            img = getattr(mat, attr, None)
+            if img is not None:
+                return img
+        return None
+
+    img = _from(getattr(mesh, "visual", None))
+    if img is not None:
+        return img
+    # force="mesh" can drop the material on concatenation -> reload as a scene and scan geometries.
+    sc = trimesh.load(glb_path)
+    geoms = list(sc.geometry.values()) if isinstance(sc, trimesh.Scene) else [sc]
+    for g in geoms:
+        img = _from(getattr(g, "visual", None))
+        if img is not None:
+            return img
+    return None
 
 
 class TextureWorker:
@@ -485,17 +576,22 @@ class TextureWorker:
 
     @torch.inference_mode()
     def reface(self, uid: str, textured_glb_path: str, elev: float, azim: float, view_image,
-               depth_band: float = 0.35, mask=None):
+               depth_band: float = 1.0, mask=None, mirror: bool = False):
         """Depth-aware single-view re-texture of an ALREADY-textured mesh.
 
-        Loads the mesh preserving its existing UVs + texture (the base), then bakes
-        `view_image` (the improved view) onto ONLY the nearest depth band (foreground) at the
-        (elev, azim) camera and composites over the base — so farther surfaces keep their
-        current texture (a car in front of a wall: only the car is repainted). Works for any
-        camera: the 6 cardinal faces and the 3/4 corners (fl/fr/bl/br). `mask` (PIL, white =
-        repaint) overrides the auto depth band when provided. Albedo-only matte output.
+        Loads the mesh preserving its existing UVs + texture (the base). The generated view is
+        GEOMETRY-MATCHED to the mesh first (rembg the painted subject, fit it to the rendered
+        silhouette — same alignment projection/gptproject use, so scale + position follow the
+        geometry, not gpt's drift), then baked at the (elev, azim) camera and composited over the
+        base. `depth_band` (0..1) limits the bake to the nearest fraction of the face's depth range;
+        the default 1.0 repaints EVERY visible camera-facing surface (back_project skips occluded +
+        grazing texels itself). Set it < 1 to repaint only the frontmost slab (a car in front of a
+        wall: just the car) — but note a small band drops separate visible objects that merely sit
+        farther, e.g. the car roofs on a TOP view. Works for any camera: the 6 cardinal faces and the
+        3/4 corners (fl/fr/bl/br). `mask` (PIL, white = repaint) overrides the band. Albedo-only matte.
         """
         import math
+        import cv2
         import numpy as np
         import trimesh
         from PIL import Image
@@ -506,10 +602,15 @@ class TextureWorker:
         render = pp.render
         rs = pp.config.render_size
 
-        # 1) Load the textured mesh PRESERVING its UVs + texture (the base to composite over).
-        #    No mesh_uv_wrap: re-unwrapping would discard the existing texture's UV layout.
+        # 1) Load the textured mesh PRESERVING its UVs (no mesh_uv_wrap — re-unwrapping would
+        #    discard the existing texture's UV layout). The renderer's load_mesh reads UVs but NOT
+        #    the texture image, so seed the existing texture explicitly as the base to composite over.
         mesh = trimesh.load(textured_glb_path, force="mesh")
         render.load_mesh(mesh=mesh)
+        tex_img = _extract_base_texture(mesh, textured_glb_path)
+        if tex_img is None:
+            raise RuntimeError("reface: the source GLB has no readable base-color texture")
+        render.set_texture(tex_img.convert("RGB"))  # force_set=False -> resized to texture_size, [0,1]
         base = torch.from_numpy(render.get_texture()).float().to(render.device)  # (Ht,Wt,3) in [0,1]
 
         # 2) Screen-space depth at the face camera. POSITION encodes each vertex as
@@ -525,21 +626,56 @@ class TextureWorker:
         cam = -w2c[:3, :3].T @ w2c[:3, 3]
         depth = np.linalg.norm(world - cam[None, None, :], axis=-1)
 
-        # 3) Foreground mask: explicit mask overrides; else keep the nearest depth band.
+        # 3) Foreground mask: explicit mask overrides; else keep texels within the nearest depth band.
+        #    depth_band=1.0 (default) -> thr = max depth -> fg = every visible texel. Repainting ALL
+        #    visible surfaces is correct: back_project only writes visible, camera-facing texels (it
+        #    skips occluded ones per-pixel and grazing ones via the cos threshold), so "farther" does
+        #    NOT mean "behind". A SMALL band keeps only the nearest slab — useful to repaint just the
+        #    frontmost object — but it wrongly drops separate visible objects that merely sit farther:
+        #    on a TOP view the roof is near and the cars sit far below it, so a small band leaves the
+        #    car roofs unpainted. Hence the default repaints everything visible.
         if mask is not None:
             fg = (np.asarray(mask.convert("L").resize((rs, rs))) > 127) & valid
         else:
             dv = depth[valid]
-            if dv.size and float(dv.max()) > float(dv.min()):
+            if dv.size and float(dv.max()) > float(dv.min()) and float(depth_band) < 1.0:
                 thr = float(dv.min()) + float(depth_band) * (float(dv.max()) - float(dv.min()))
                 fg = valid & (depth <= thr)
             else:
-                fg = valid  # no depth spread (flat face) -> repaint all of it
-        fg_alpha = (fg.astype(np.uint8) * 255)
+                fg = valid  # band >= 1.0 or flat face -> repaint all visible
 
-        # 4) Bake the masked view as RGBA -> back_project carries the fg mask in the baked alpha.
-        view = view_image.convert("RGB").resize((rs, rs))
-        rgba = np.dstack([np.asarray(view), fg_alpha]).astype(np.float32) / 255.0
+        # 4) Geometry-match the generated view to the mesh, then bake the foreground band.
+        #    rembg the painted subject + fit it to the rendered silhouette bbox so its scale and
+        #    position follow the geometry (not gpt's ~12% drift) — exactly how projection/
+        #    gptproject align before baking. The foreground∧coverage mask rides in the alpha so
+        #    back_project only updates the nearest band where the subject paints. View and mask
+        #    are flipped together when mirror is set, so they stay aligned through the renderer's
+        #    mirror convention.
+        normal = render.render_normal(elev, azim, return_type="pl")
+        try:
+            subject = self.rembg(view_image.convert("RGB"))
+        except Exception:  # noqa: BLE001
+            subject = view_image.convert("RGBA")
+        aligned = _align_photo(subject, _silhouette_bbox(normal, rs), rs, with_alpha=True)
+        # Refine that bbox fit against the ACTUAL mesh silhouette (`valid`). The generator can't
+        # pixel-lock the geometry (it reframes the asset ~1.4x + a few % aspect) and thin outliers
+        # like trees skew the painted bbox, so the bbox fit leaves a residual global scale/offset
+        # — the "close but not exact" drift. A small per-axis scale + shift that maximises overlap
+        # with the silhouette removes most of it; monotonic, so an already-aligned view is a no-op.
+        aligned_np = np.asarray(aligned)
+        refine_M = _best_silhouette_fit(aligned_np[..., 3] > 127, valid, rs)
+        if refine_M is not None:
+            aligned_np = cv2.warpAffine(aligned_np, refine_M, (rs, rs), flags=cv2.INTER_LINEAR)
+        # Bake ONLY where the subject actually paints AND the depth band says foreground.
+        # _align_photo sits the subject on a WHITE canvas; gating by the depth band alone bakes
+        # that white wherever the aligned subject doesn't cover a foreground texel (silhouette
+        # edges + gpt/gemini shape drift) -> the "white where the texture should be" holes. The
+        # subject's own coverage (its alpha) closes them: uncovered foreground keeps the base.
+        cover = aligned_np[..., 3] > 127
+        bake_alpha = ((fg & cover).astype(np.uint8) * 255)
+        rgba = np.dstack([aligned_np[..., :3], bake_alpha]).astype(np.float32) / 255.0
+        if mirror:
+            rgba = rgba[:, ::-1, :].copy()
         new_tex, cos_map, _ = render.back_project(rgba, elev, azim)
         fg_uv = (cos_map[..., 0] > 1e-4) & (new_tex[..., 3] > 0.5)
 
@@ -566,6 +702,79 @@ class TextureWorker:
         if self.low_vram_mode:
             torch.cuda.empty_cache()
         return textured_path
+
+    @torch.inference_mode()
+    def render_geom_shaded(self, shape_glb_path: str, elev: float, azim: float):
+        """Grey shaded geometry render at one camera — the 'grey GEOMETRY render' gen_transfer's
+        gpt/Gemini prompts expect, but from the Hunyuan camera so a geometry-locked gen+transfer
+        output aligns to reface's back_project. Lambert from the camera-facing normal component
+        (bright head-on, dark at grazing edges), white background outside the silhouette."""
+        import numpy as np
+        import trimesh
+        from PIL import Image
+        from utils.uvwrap_utils import mesh_uv_wrap
+
+        pp = self.paint_pipeline
+        render = pp.render
+        rs = pp.config.render_size
+        mesh = trimesh.load(shape_glb_path, force="mesh")
+        mesh = mesh_uv_wrap(mesh)
+        render.load_mesh(mesh=mesh)
+        nrm = render.render_normal(elev, azim, use_abs_coor=False, return_type="th").detach().cpu().numpy().reshape(rs, rs, 3)
+        vis = render.render_alpha(elev, azim, return_type="th").detach().cpu().numpy().reshape(rs, rs) > 0
+        n = nrm * 2.0 - 1.0
+        facing = np.clip(np.abs(n[..., 2]), 0.0, 1.0)  # camera-axis component (head-on = 1)
+        # Map to a MID-GREY band that never reaches white: a head-on surface at shade=1.0 -> 255
+        # would vanish into the white background, and the gen+transfer step would paint it white
+        # (that was the "plain white where textures should be" bug). Head-on lighter, grazing darker,
+        # but always clearly grey vs the white bg.
+        shade = 0.30 + 0.42 * facing                   # [0.30, 0.72] -> grey [76, 184]
+        grey = (shade * 255.0).astype(np.uint8)
+        img = np.repeat(grey[..., None], 3, axis=2)
+        img[~vis] = 255                                # white background outside the silhouette
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return Image.fromarray(img)
+
+    @torch.inference_mode()
+    def render_textured_view(self, textured_glb_path: str, elev: float, azim: float):
+        """Forward-render the ALREADY-textured mesh at one camera: EXACT geometry + the existing baked
+        colours, white background. This is the geometry-locked canvas reface restyles toward the
+        references. Because it is a COMPLETE colour render (not a grey geom), the image model keeps ITS
+        geometry and only takes colour/style from the references — a grey/partial image instead loses
+        its shape to a full-colour reference (the genview-drift bug). Same camera path as back_project
+        so the result aligns to the bake. Convention mirrors webapp/glb_faces.py."""
+        import numpy as np
+        import trimesh
+        import torch.nn.functional as F
+        from PIL import Image
+        from DifferentiableRenderer.MeshRender import get_mv_matrix, transform_pos
+
+        pp = self.paint_pipeline
+        render = pp.render
+        rs = pp.config.render_size
+        mesh = trimesh.load(textured_glb_path, force="mesh")
+        render.load_mesh(mesh=mesh)
+        tex_img = _extract_base_texture(mesh, textured_glb_path)
+        if tex_img is None:
+            raise RuntimeError("render_textured_view: the source GLB has no readable base-color texture")
+        render.set_texture(np.asarray(tex_img.convert("RGB")).astype(np.float32) / 255.0)
+
+        proj = render.camera_proj_mat
+        r_mv = get_mv_matrix(elev=elev, azim=azim, camera_distance=render.camera_distance, center=None)
+        pos_clip = transform_pos(proj, transform_pos(r_mv, render.vtx_pos, keepdim=True))
+        rast_out, _ = render.raster_rasterize(pos_clip, render.pos_idx, resolution=(rs, rs))
+        uv, _ = render.raster_interpolate(render.vtx_uv[None, ...], rast_out, render.uv_idx)
+        vis = torch.clamp(rast_out[..., -1:], 0, 1)[0]
+        tex = render.tex.to(render.device).float()
+        if tex.max() > 1.5:
+            tex = tex / 255.0
+        samp = F.grid_sample(tex.permute(2, 0, 1)[None], uv * 2 - 1, align_corners=False)[0].permute(1, 2, 0)
+        img = samp * vis + (1 - vis) * 1.0             # white background outside the silhouette
+        out = (img.clamp(0, 1).cpu().numpy() * 255).astype(np.uint8)
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return Image.fromarray(out)
 
     @torch.inference_mode()
     def render_geometry_at(self, shape_glb_path: str, cams):

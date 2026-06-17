@@ -59,6 +59,8 @@ def generate_elevations(source_path, provided=None, extra_context=None, out_dir=
     """
     provided = provided or {}
     sides = sides or ELEVATION_SIDES
+    # Resume: reuse an already-generated elevation on disk (skip the API call). Default on.
+    reuse = os.environ.get("MVGPT_REUSE", "1").lower() not in ("0", "false", "no")
     src = Image.open(source_path).convert("RGB")
     context = [src] + [Image.open(p).convert("RGB") for p in (extra_context or []) if os.path.exists(p)]
     result = {}
@@ -68,6 +70,9 @@ def generate_elevations(source_path, provided=None, extra_context=None, out_dir=
             img = Image.open(provided[side]).convert("RGB")
             img.save(path)
             print(f"[elevations] {side}: using provided reference")
+        elif reuse and os.path.exists(path):
+            img = Image.open(path).convert("RGB")
+            print(f"[elevations] {side}: reuse existing")
         else:
             img = edit_image(context, _elev_prompt(side, len(context)), size=size)
             img.save(path)

@@ -54,6 +54,18 @@ SIDE_DIR = {
     "fl_hi": (Vector((1, -1, 2.0)), Vector((0, 0, 1))),
     "br_hi": (Vector((-1, 1, 2.0)), Vector((0, 0, 1))),
     "bl_hi": (Vector((1, 1, 2.0)), Vector((0, 0, 1))),
+    # BELOW-horizon fills (camera UNDER the prop, looking up-and-out, ~45deg below). Match the hyface
+    # `_lo` views (PROJECTION_CAMS azimuth, elev -45). These reach the cars' DOWN-AND-OUT lower faces
+    # (sills/rockers/wheel sides) that every level/down camera misses — used by the single-winner hybrid
+    # bake to overlay just those lower faces on top of the cosine result. Same X-mirror as above.
+    "front_lo": (Vector((0, -1, -1.0)), Vector((0, 0, 1))),
+    "back_lo": (Vector((0, 1, -1.0)), Vector((0, 0, 1))),
+    "left_lo": (Vector((1, 0, -1.0)), Vector((0, 0, 1))),    # mirrored: left = +X
+    "right_lo": (Vector((-1, 0, -1.0)), Vector((0, 0, 1))),  # mirrored: right = -X
+    "fl_lo": (Vector((1, -1, -1.41)), Vector((0, 0, 1))),
+    "fr_lo": (Vector((-1, -1, -1.41)), Vector((0, 0, 1))),
+    "bl_lo": (Vector((1, 1, -1.41)), Vector((0, 0, 1))),
+    "br_lo": (Vector((-1, 1, -1.41)), Vector((0, 0, 1))),
 }
 
 
@@ -146,9 +158,11 @@ def assign_faces(obj, me, cams, sides, min_dot=0.5, occlude=True, cardinal_bonus
             dot = n.dot(d.normalized())
             if dot <= min_dot:
                 continue
-            is_tilt = side.endswith("_hi")
-            if is_tilt and n.z < tilt_up_min:
+            if side.endswith("_hi") and n.z < tilt_up_min:
                 continue  # tilts only paint upward-facing faces (roof/tops), never vertical walls/car sides
+            if side.endswith("_lo") and n.z > -tilt_up_min:
+                continue  # below-horizon fills only paint DOWN-facing faces (car sills/rockers/underside),
+                          # never vertical walls or roofs — those stay on the cosine base.
             score = dot + (cardinal_bonus if side in CARDINAL_SIDES else 0.0)
             if score <= best_score:
                 continue

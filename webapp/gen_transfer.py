@@ -149,6 +149,57 @@ def transfer(geom_path, gen_img, style_anchors=None):
     return edit_image(imgs, prompt, size=(S, S), prefer="gemini")
 
 
+def _is_h_mirrored(out_img, base_img, margin=0.03):
+    """True if out_img is a horizontal mirror of base_img. The image model occasionally flips a SIDE
+    view left<->right while restyling. Compares bbox-normalised silhouettes flipped vs not; the margin
+    avoids flipping a near-symmetric (front/back/top) view, where a flip would not matter anyway."""
+    import numpy as np
+
+    def _silbox(img, s=160):
+        a = np.asarray(img.convert("RGB").resize((256, 256))).astype(np.int16)
+        m = np.abs(a - a[0, 0]).sum(-1) > 24          # background = top-left corner colour
+        ys, xs = np.where(m)
+        if xs.size == 0:
+            return None
+        crop = (m[ys.min():ys.max() + 1, xs.min():xs.max() + 1].astype(np.uint8) * 255)
+        return np.asarray(Image.fromarray(crop).resize((s, s))) > 127
+
+    sb = _silbox(base_img); so = _silbox(out_img)
+    if sb is None or so is None:
+        return False
+    iou = lambda x, y: (x & y).sum() / ((x | y).sum() or 1)
+    return iou(so[:, ::-1], sb) > iou(so, sb) + margin
+
+
+def restyle_to_references(base_render, ref_paths, max_refs=3):
+    """Reface restyle: push the reference images' look onto a REAL textured-mesh render while holding
+    its geometry EXACTLY.
+
+    `base_render` is the current mesh rendered at the face camera — a COMPLETE colour image with the
+    exact geometry and the colours base-texturing already baked. Because Image 1 is a full-colour
+    render (not a grey geom), the model keeps ITS outline/proportions and only takes colour/material/
+    style from the references; a grey or partial Image 1 instead abandons its shape to a colour
+    reference, which is the genview-geometry-drift bug. Single structural image + references as style
+    only. Accepts paths/PIL; returns a PIL image."""
+    base = _open(base_render)
+    refs = [_open(r) for r in (ref_paths or [])][:max_refs]
+    prompt = (
+        "Image 1 is the asset to KEEP. The remaining image(s) are STYLE/COLOUR references of the SAME "
+        "asset from a DIFFERENT viewpoint — their framing, scale, shape and layout are IRRELEVANT and "
+        "MUST be ignored. Output Image 1 with its geometry, outline, composition and EVERY element's "
+        "position, shape and size reproduced PIXEL-FOR-PIXEL (the result must overlay Image 1 exactly), "
+        "only refining its colours, materials and shading toward the reference palette and style. Do NOT "
+        "adopt the references' viewpoint, scale or layout; do NOT move, resize, add, remove or reshape "
+        "anything from Image 1. Plain pure-white background. " + CARTOON_STYLE)
+    out = edit_image([base] + refs, prompt, size=(S, S), prefer="gemini")
+    # The model occasionally mirrors a side view (left<->right) while restyling. base is the real mesh
+    # render — ground truth and in back_project's handedness — so undo any flip against it, else the
+    # bake paints the left face onto the right.
+    if _is_h_mirrored(out, base):
+        out = out.transpose(Image.FLIP_LEFT_RIGHT)
+    return out
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--uid", required=True)
