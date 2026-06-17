@@ -173,25 +173,49 @@ def _is_h_mirrored(out_img, base_img, margin=0.03):
 
 def restyle_to_references(base_render, ref_paths, max_refs=3):
     """Reface restyle: push the reference images' look onto a REAL textured-mesh render while holding
-    its geometry EXACTLY.
+    its geometry EXACTLY. Two stages:
 
-    `base_render` is the current mesh rendered at the face camera — a COMPLETE colour image with the
-    exact geometry and the colours base-texturing already baked. Because Image 1 is a full-colour
-    render (not a grey geom), the model keeps ITS outline/proportions and only takes colour/material/
-    style from the references; a grey or partial Image 1 instead abandons its shape to a colour
-    reference, which is the genview-geometry-drift bug. Single structural image + references as style
-    only. Accepts paths/PIL; returns a PIL image."""
+    Stage 1 (gpt-image-2): apply the references' COLOURS onto the base render. gpt is the stronger
+    "recolour an object to match a reference" model — it turns a blue car white when the reference is
+    white, where a lone gemini pass tends to preserve the base colour. Its geometry may drift slightly;
+    that's fine, the result is used ONLY as a colour reference for stage 2, never for geometry.
+    Stage 2 (gemini): geometry-locked transfer — base_render (a COMPLETE colour render) is the structural
+    authority so the model keeps its exact outline/proportions, taking colour from stage 1's result. A
+    grey/partial Image 1 would instead abandon its shape to the colour image (the genview-drift bug).
+
+    `base_render` is the current mesh rendered at the face camera. Accepts paths/PIL; returns a PIL image."""
     base = _open(base_render)
     refs = [_open(r) for r in (ref_paths or [])][:max_refs]
+
+    # Stage 1 — gpt-image-2 recolours the base render toward the references (skip if no refs; fall back
+    # to the raw refs if it fails). Geometry drift here is harmless: it is only a colour reference.
+    color_ref = None
+    if refs:
+        gpt_prompt = (
+            "Image 1 is a 3D game-asset render — the geometry and layout to KEEP. The remaining image(s) "
+            "are COLOUR/STYLE references of the SAME asset (possibly a different viewpoint). Repaint Image 1 "
+            "so every object takes the references' colours, materials and flat-cartoon style: where a "
+            "reference colour differs from Image 1's current colour, RECOLOUR the object to match it (a car "
+            "the reference shows white becomes white); where they already agree, just clean it up. Keep "
+            "Image 1's composition, the objects present and their positions; do NOT add, remove or move "
+            "anything. Plain white background. " + CARTOON_STYLE)
+        try:
+            color_ref = edit_image([base] + refs, gpt_prompt, size=(S, S), prefer="openai")
+        except Exception:  # noqa: BLE001
+            color_ref = None
+
+    # Stage 2 — gemini locks to base_render's geometry, taking colour from stage 1's result (or the raw
+    # references if stage 1 was skipped/failed).
+    col_inputs = [color_ref] if color_ref is not None else refs
     prompt = (
         "Image 1 is the asset to KEEP. The remaining image(s) are STYLE/COLOUR references of the SAME "
-        "asset from a DIFFERENT viewpoint — their framing, scale, shape and layout are IRRELEVANT and "
-        "MUST be ignored. Output Image 1 with its geometry, outline, composition and EVERY element's "
-        "position, shape and size reproduced PIXEL-FOR-PIXEL (the result must overlay Image 1 exactly), "
-        "only refining its colours, materials and shading toward the reference palette and style. Do NOT "
-        "adopt the references' viewpoint, scale or layout; do NOT move, resize, add, remove or reshape "
+        "asset — their framing, scale, shape and layout are IRRELEVANT and MUST be ignored. Output Image 1 "
+        "with its geometry, outline, composition and EVERY element's position, shape and size reproduced "
+        "PIXEL-FOR-PIXEL (the result must overlay Image 1 exactly), taking the colours, materials and "
+        "shading from the reference by position (recolour where they differ, refine where they agree). Do "
+        "NOT adopt the references' viewpoint, scale or layout; do NOT move, resize, add, remove or reshape "
         "anything from Image 1. Plain pure-white background. " + CARTOON_STYLE)
-    out = edit_image([base] + refs, prompt, size=(S, S), prefer="gemini")
+    out = edit_image([base] + col_inputs, prompt, size=(S, S), prefer="gemini")
     # The model occasionally mirrors a side view (left<->right) while restyling. base is the real mesh
     # render — ground truth and in back_project's handedness — so undo any flip against it, else the
     # bake paints the left face onto the right.

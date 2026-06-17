@@ -316,7 +316,7 @@ els.texBtn.addEventListener("click", async () => {
       // Depth-aware single-face re-texture of an existing TEXTURED model.
       const sid = retextureSource || currentJob;
       if (!sid) { showError("Open or select a textured model first (Reface edits an existing texture)"); return; }
-      if (!gptReferenceFiles.length) { showError("Add at least one reference image for Reface"); return; }
+      // References optional: with none, the backend asks gpt-image-2 to generate one from the geometry.
       setBusy(true); showProgress("Queued (reface)", 60);
       const fd = new FormData();
       fd.append("source_id", sid);
@@ -460,6 +460,7 @@ async function loadGallery() {
           <span class="badge ${it.textured ? "tex" : "shp"}">${it.textured ? "textured" : "shape"}</span>
           <span class="gcard-actions">
             ${it.shape_url ? '<button class="gbtn" data-act="tex" title="Texture this model">🎨</button>' : ""}
+            ${it.textured_url ? '<button class="gbtn" data-act="reface" title="Reface this model (re-texture a face)">🖌️</button>' : ""}
             <button class="gbtn" data-act="del" title="Delete">🗑</button>
           </span>
         </div>`;
@@ -473,6 +474,8 @@ async function loadGallery() {
       });
       const texBtnEl = card.querySelector('[data-act="tex"]');
       if (texBtnEl) texBtnEl.addEventListener("click", (e) => { e.stopPropagation(); enterRetexture(it.id); });
+      const refaceBtnEl = card.querySelector('[data-act="reface"]');
+      if (refaceBtnEl) refaceBtnEl.addEventListener("click", (e) => { e.stopPropagation(); enterReface(it.id, it.textured_url, it.shape_url); });
       card.querySelector('[data-act="del"]').addEventListener("click", (e) => { e.stopPropagation(); deleteModel(it.id, card); });
       els.galleryStrip.appendChild(card);
     });
@@ -491,6 +494,22 @@ function enterRetexture(id) {
 function exitRetexture() {
   retextureSource = null;
   els.retexBanner.hidden = true;
+}
+// Pick an existing TEXTURED model (incl. a previous reface result) as the reface source. Reface
+// edits a baked texture face-by-face, so it needs a textured model, not a shape + uploaded image.
+function enterReface(id, texturedUrl, shapeUrlArg) {
+  retextureSource = id;
+  currentJob = id;
+  texUrl = texturedUrl;
+  shapeUrl = shapeUrlArg || null;
+  els.tabTex.disabled = !texUrl;
+  els.tabShape.disabled = !shapeUrl;
+  if (texmodeSel) { texmodeSel.value = "reface"; applyTextureMode(); }
+  if (texUrl) loadModel(texUrl, "tex");
+  els.retexBanner.hidden = false;
+  els.retexText.textContent = `Reface ${id.slice(0, 8)} — pick a face (references optional), then Generate Texture.`;
+  if (typeof setBusy === "function") setBusy(false);
+  window.scrollTo({ top: 0, behavior: "smooth" });
 }
 els.retexCancel.addEventListener("click", exitRetexture);
 async function deleteModel(id, card) {
