@@ -2,7 +2,50 @@
 
 ## Unreleased
 
+### Fixed
+- **New studio GPU kinds were dropped by the worker loop.** `server._worker_loop` routed only a
+  hardcoded tuple (`studio_base/mesh/reface/face_edit`) to `studio.run_gpu_job`, so `studio_face_clear`,
+  `studio_face_render` and `studio_handpaint` were dequeued and silently dropped (job stuck at 5%). Now
+  routes any `studio_*` kind — no per-kind list to keep in sync.
+- **Texture baked onto the mirror face (left↔right, and the 3/4 corners swapped).** Hunyuan's azimuth
+  is left-handed (`get_mv_matrix` puts the camera at `[-sin(azim), cos(azim), 0]`), so azim 90 frames
+  the object's RIGHT and azim 270 the LEFT — the opposite of the reference convention. `PROJECTION_CAMS`
+  fed `left`→90/`right`→270, so a `left` reface/paint landed on the right face; the corner tables had the
+  same swap (`fl`/`fr` and `bl`/`br` reversed). Corrected to `left=270, right=90` (`pipeline.py`) and
+  `fl=315, fr=45, bl=225, br=135` (`server.HYFACE_CORNER_CAMS`, `studio.CORNER_AZ`). Verified by render:
+  the per-face canvas now matches each view's reference instead of its mirror. Re-run base / per-face
+  texturing to apply (existing textures were baked at the old azimuths).
+- **Worker never drained the studio queue (`__main__` vs `webapp.server` split).** `python -m webapp.server`
+  loads the file as `__main__`, a different module object from the `webapp.server` that `studio.py`
+  imports — so the GPU worker read `__main__.WORK` while studio jobs were enqueued onto `webapp.server.WORK`.
+  Mesh/texture jobs sat unprocessed (stuck at 5%). The launcher now runs `webapp.server.main()` so the
+  worker, queue, health, and submit path share one module instance.
+
 ### Added
+- **Hand-paint touch-ups on a face.** A "Hand paint" method on each face renders the face AS IT
+  CURRENTLY LOOKS on the mesh (`POST faces/{view}/render` → `studio_face_render` →
+  `facerender_{view}.png`, reused while fresh) and lets you brush strokes on it with a palette sampled
+  client-side from that view's reference. "Apply" sends an RGBA overlay (transparent except the strokes)
+  to `POST faces/{view}/handpaint`, baked straight onto the face by a new
+  `TextureWorker.paint_overlay` (direct `back_project`, no rembg/silhouette-fit — the strokes are
+  pixel-locked to the camera). Pushes a "Hand paint {view}" history snapshot.
+  `components/studio/hand-paint-canvas.tsx`.
+- **Remesh button (textured state).** A collapsible "Remesh" control in the texture panel regenerates
+  the 3D shape from a chosen reference view (reuses `POST /mesh`); it warns that this resets the texture
+  and history.
+- **Texture history (undo/redo per step) + reset + per-face clear.** Every completed base/reface/paint
+  auto-snapshots the whole-mesh texture GLB into `outputs/models/{id}/texture_history/{seq}.glb` plus a
+  metadata entry (`textureHistory`, `textureSeq` in `model.json`, exposed on the `Model`). New endpoints:
+  `POST texture/restore/{seq}` (roll the texture back to any prior step — instant file copy, then
+  re-texture forward), `POST texture/reset` (delete the texture back to the untextured mesh; history
+  kept), `POST faces/{view}/clear` (GPU re-bake reverting ONE face to the base by projecting the base
+  snapshot's render onto that face). Regenerating the mesh clears the history (snapshots belong to the
+  old UV). Frontend: a "Texture history" timeline with per-step Restore, a "Reset" button, and a per-face
+  Clear (↩) on each face tile. Tests: `test_texture_history_snapshot_restore_reset_clear`,
+  `test_mesh_regen_clears_texture_history`. A per-face edit now also self-heals `textureStage` to
+  `complete` (it only runs on an already-textured model).
+
+
 - **Per-model Studio API + new Next.js frontend.** A durable, named *model* owns its 10 reference
   views, mesh, and texture (reusable across runs; survives restart). New modules `webapp/studio.py`
   (registry + `/api/models/*` router + unified job store, persisted as
@@ -153,6 +196,11 @@
   `gen_transfer.py`, `blender_project.py`, the `gpt_angles` field) are retained.
 
 ### Changed
+- **Reface restyle directives.** Where a colour already matches the reference, reface now sharpens and
+  lifts the detail/resolution to the reference's crispness instead of just leaving it; and it keeps each
+  colour inside its object's silhouette — no colour bleed onto neighbouring objects (`gen_transfer.py`,
+  both gpt + gemini stages).
+
 - MV+GPT (`mvgpt`) blender path is now resumable and parallel:
   - Resume: `MVGPT_REUSE` (default on) reuses any per-side artifact already on disk —
     elevations (`generate_elevations`), grey geometry renders (`_blender_geometry`), per-side

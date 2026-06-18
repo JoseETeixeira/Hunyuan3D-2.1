@@ -370,12 +370,17 @@ class TextureWorker:
             torch.cuda.empty_cache()
         return textured_path
 
-    # Canonical camera angle (elevation, azimuth) per labelled view.
+    # Canonical (elevation, azimuth) per labelled view. Hunyuan's azimuth is LEFT-handed vs the
+    # reference convention: get_mv_matrix places the camera at [-sin(azim), cos(azim), 0] (elev 0),
+    # so azim 90 sits at -X and frames the object's RIGHT side (front-on-left), while azim 270 sits
+    # at +X and frames the LEFT side (front-on-right). The user's left/right references therefore bake
+    # at 270/90 respectively — swapping these is what stops a `left` reface landing on the right face.
+    # front/back/top/bottom are handedness-neutral. (3/4-corner azimuths live in their own tables.)
     PROJECTION_CAMS = {
         "front": (0, 0),
         "back": (0, 180),
-        "left": (0, 90),
-        "right": (0, 270),
+        "left": (0, 270),
+        "right": (0, 90),
         "top": (90, 0),
         "bottom": (-90, 0),
     }
@@ -728,6 +733,46 @@ class TextureWorker:
             print(f"[reface] diag failed: {_e}")
 
         # 5) Composite foreground texels over the existing base; everything else untouched.
+        out = base.clone()
+        out[fg_uv] = new_tex[..., :3][fg_uv]
+        render.set_texture(out, force_set=True)
+
+        obj_path = os.path.join(self.output_dir, f"{uid}_reface.obj")
+        render.save_mesh(obj_path, downsample=True)
+        textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
+        mesh_out = trimesh.load(obj_path)
+        _force_matte(mesh_out)
+        mesh_out.export(textured_path)
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return textured_path
+
+    @torch.inference_mode()
+    def paint_overlay(self, uid: str, textured_glb_path: str, elev: float, azim: float, overlay):
+        """Bake a HAND-PAINTED overlay straight onto an already-textured mesh at the (elev, azim) face
+        camera. `overlay` is a PIL RGBA already aligned to that camera's render (the user painted ON the
+        face render), its alpha marking the strokes. No rembg / silhouette-fit — the strokes are
+        pixel-locked to the camera — so only the painted, visible, camera-facing texels are composited
+        over the existing base; every other texel is untouched. Albedo-only matte, like reface."""
+        import numpy as np
+        import trimesh
+        elev, azim = float(elev), float(azim)
+        pp = self.paint_pipeline
+        render = pp.render
+        rs = pp.config.render_size
+
+        mesh = trimesh.load(textured_glb_path, force="mesh")
+        render.load_mesh(mesh=mesh)
+        tex_img = _extract_base_texture(mesh, textured_glb_path)
+        if tex_img is None:
+            raise RuntimeError("paint_overlay: the source GLB has no readable base-color texture")
+        render.set_texture(tex_img.convert("RGB"))
+        base = torch.from_numpy(render.get_texture()).float().to(render.device)
+
+        ov = np.asarray(overlay.convert("RGBA").resize((rs, rs))).astype(np.float32) / 255.0
+        ov[..., 3] = (ov[..., 3] > 0.5).astype(np.float32)  # bake only the painted strokes
+        new_tex, cos_map, _ = render.back_project(ov, elev, azim)
+        fg_uv = (cos_map[..., 0] > 1e-4) & (new_tex[..., 3] > 0.5)
         out = base.clone()
         out[fg_uv] = new_tex[..., :3][fg_uv]
         render.set_texture(out, force_set=True)

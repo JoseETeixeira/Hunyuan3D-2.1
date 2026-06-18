@@ -194,6 +194,90 @@ def test_masked_edit_reference():
     assert model["references"]["front"]["url"]
 
 
+def test_texture_history_snapshot_restore_reset_clear():
+    c = _client()
+    mid = _create(c, "Hist")
+    tex = studio.OUTPUT_DIR / f"{mid}_textured.glb"
+
+    def _mark(d, stage, faces):
+        d["textureStage"] = stage
+        d["faces"] = {v: dict(faces) for v in rv.ALL_VIEWS}
+
+    # simulate a completed base run -> snapshot seq 0
+    tex.write_bytes(b"glb-base")
+    studio._update(mid, lambda d: _mark(d, "complete", {"status": "done", "mode": "paint"}))
+    studio._push_snapshot(mid, "Base texture")
+    # simulate a reface of left -> snapshot seq 1
+    tex.write_bytes(b"glb-reface-left")
+    studio._update(mid, lambda d: d["faces"].__setitem__("left", {"status": "done", "mode": "reface"}))
+    studio._push_snapshot(mid, "Reface left")
+
+    m = c.get(f"/api/models/{mid}").json()
+    assert [e["label"] for e in m["textureHistory"]] == ["Base texture", "Reface left"]
+    assert [e["seq"] for e in m["textureHistory"]] == [0, 1]
+
+    # restore the base (seq 0): current glb reverts and left goes back to paint
+    m2 = c.post(f"/api/models/{mid}/texture/restore/0").json()
+    assert tex.read_bytes() == b"glb-base"
+    assert m2["faces"]["left"]["mode"] == "paint" and m2["textureStage"] == "complete"
+    assert c.post(f"/api/models/{mid}/texture/restore/99").status_code == 404
+
+    # with a texture present, clear_face dispatches a GPU job against the base snapshot
+    calls = []
+    orig = studio.submit_gpu
+    studio.submit_gpu = lambda kind, sjid: calls.append((kind, sjid))
+    try:
+        assert c.post(f"/api/models/{mid}/faces/left/clear").status_code == 200
+        assert calls and calls[0][0] == "studio_face_clear"
+    finally:
+        studio.submit_gpu = orig
+
+    # reset: texture gone, stage none, history preserved (still restorable)
+    m3 = c.post(f"/api/models/{mid}/texture/reset").json()
+    assert m3["texturedUrl"] is None and m3["textureStage"] == "none"
+    assert len(m3["textureHistory"]) == 2
+    assert not tex.exists()
+    # clearing a face with no texture -> 400
+    assert c.post(f"/api/models/{mid}/faces/left/clear").status_code == 400
+
+
+def test_mesh_regen_clears_texture_history():
+    c = _client()
+    mid = _create(c, "MeshHist")
+    tex = studio.OUTPUT_DIR / f"{mid}_textured.glb"
+    tex.write_bytes(b"glb-base")
+    studio._update(mid, lambda d: d.__setitem__("textureStage", "complete"))
+    studio._push_snapshot(mid, "Base texture")
+    assert len(c.get(f"/api/models/{mid}").json()["textureHistory"]) == 1
+    studio._clear_history(mid)
+    assert c.get(f"/api/models/{mid}").json()["textureHistory"] == []
+
+
+def test_handpaint_and_render_endpoints():
+    c = _client()
+    mid = _create(c, "Paint")
+    png = _png()
+    # no texture yet -> render/handpaint 400, render-image 404
+    assert c.post(f"/api/models/{mid}/faces/front/render").status_code == 400
+    assert c.post(f"/api/models/{mid}/faces/front/handpaint",
+                  files={"overlay": ("o.png", png, "image/png")}).status_code == 400
+    assert c.get(f"/api/models/{mid}/faces/front/render-image").status_code == 404
+    # give it a texture, then both dispatch their GPU jobs
+    (studio.OUTPUT_DIR / f"{mid}_textured.glb").write_bytes(b"glb")
+    calls = []
+    orig = studio.submit_gpu
+    studio.submit_gpu = lambda kind, sjid: calls.append((kind, sjid))
+    try:
+        assert c.post(f"/api/models/{mid}/faces/front/render").status_code == 200
+        assert calls[-1][0] == "studio_face_render"
+        assert c.post(f"/api/models/{mid}/faces/front/handpaint",
+                      files={"overlay": ("o.png", png, "image/png")}).status_code == 200
+        assert calls[-1][0] == "studio_handpaint"
+        assert c.get(f"/api/models/{mid}").json()["faces"]["front"]["status"] == "texturing"
+    finally:
+        studio.submit_gpu = orig
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -198,7 +198,10 @@ def restyle_to_references(base_render, ref_paths, max_refs=3, extra_prompt=None)
             "are COLOUR/STYLE references of the SAME asset (possibly a different viewpoint). Repaint Image 1 "
             "so every object takes the references' colours, materials and flat-cartoon style: where a "
             "reference colour differs from Image 1's current colour, RECOLOUR the object to match it (a car "
-            "the reference shows white becomes white); where they already agree, just clean it up. Keep "
+            "the reference shows white becomes white); where the colour ALREADY matches, do NOT recolour — "
+            "instead sharpen it and lift the detail/resolution to match the reference's crispness (never "
+            "blur or flatten). Keep every object's colour strictly inside its own silhouette — do NOT let "
+            "colour bleed onto neighbouring objects or the background. Keep "
             "Image 1's composition, the objects present and their positions; do NOT add, remove or move "
             "anything. Plain white background. " + _tweak + CARTOON_STYLE)
         try:
@@ -214,7 +217,10 @@ def restyle_to_references(base_render, ref_paths, max_refs=3, extra_prompt=None)
         "asset — their framing, scale, shape and layout are IRRELEVANT and MUST be ignored. Output Image 1 "
         "with its geometry, outline, composition and EVERY element's position, shape and size reproduced "
         "PIXEL-FOR-PIXEL (the result must overlay Image 1 exactly), taking the colours, materials and "
-        "shading from the reference by position (recolour where they differ, refine where they agree). Do "
+        "shading from the reference by position (recolour where they differ; where the colour already "
+        "matches, sharpen and lift the resolution/detail to match the reference's crispness — never blur "
+        "or flatten). Keep each colour within its object's exact silhouette — no colour bleed onto "
+        "adjacent objects. Do "
         "NOT adopt the references' viewpoint, scale or layout; do NOT move, resize, add, remove or reshape "
         "anything from Image 1. Plain pure-white background. " + _tweak + CARTOON_STYLE)
     out = edit_image([base] + col_inputs, prompt, size=(S, S), prefer="gemini")

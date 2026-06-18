@@ -322,15 +322,15 @@ def _run_shape(job_id):
 # Canonical faces for per-face paint (order = display + dedup order).
 HYFACE_FACES = ["front", "back", "left", "right", "top", "bottom"]
 
-# Corner fill cameras: {label: (azimuth, [adjacent cardinal faces])}. Azimuth follows
-# PROJECTION_CAMS (front=0, left=90, back=180, right=270); each corner sits between two
-# faces and tilts down (+elev) to reach recessed tops. The adjacent faces' references seed
-# the gpt-synth corner reference (geometry render is the layout lock).
+# Corner fill cameras: {label: (azimuth, [adjacent cardinal faces])}. These corner azimuths are
+# tuned independently (NOT derived from PROJECTION_CAMS, whose cardinal left/right are 270/90); each
+# corner tilts down (+elev) to reach recessed tops. The adjacent faces' references seed the gpt-synth
+# corner reference (geometry render is the layout lock).
 HYFACE_CORNER_CAMS = {
-    "fl": (45.0, ["front", "left"]),
-    "bl": (135.0, ["back", "left"]),
-    "br": (225.0, ["back", "right"]),
-    "fr": (315.0, ["front", "right"]),
+    "fl": (315.0, ["front", "left"]),
+    "bl": (225.0, ["back", "left"]),
+    "br": (135.0, ["back", "right"]),
+    "fr": (45.0, ["front", "right"]),
 }
 # Equatorial cardinals that also get tilted (elev +/-) views. Poles (top/bottom) excluded.
 HYFACE_TILT_FACES = ["front", "back", "left", "right"]
@@ -625,14 +625,16 @@ def _worker_loop():
                     WORK.put(("texture", job_id))
             elif kind == "texture":
                 _run_texture(job_id)
-            elif kind in ("studio_base", "studio_mesh", "studio_reface", "studio_face_edit"):
+            elif kind.startswith("studio_"):
+                # Any studio_* GPU kind (base/mesh/reface/face_edit/face_clear/face_render/handpaint)
+                # routes to the studio dispatcher — no per-kind list to keep in sync here.
                 from webapp import studio
                 studio.run_gpu_job(kind, job_id)
         except Exception as e:  # noqa: BLE001
             import traceback
 
             traceback.print_exc()
-            if kind in ("studio_base", "studio_mesh", "studio_reface", "studio_face_edit"):
+            if kind.startswith("studio_"):
                 from webapp import studio
                 studio.fail_job(job_id, str(e))
             else:
@@ -1152,4 +1154,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    # `python -m webapp.server` runs this file as `__main__`, a SEPARATE module object from
+    # `webapp.server` (which studio.py imports). They would hold independent WORK queues / JOBS
+    # dicts, so studio GPU jobs (submitted onto webapp.server.WORK) would never reach this
+    # module's worker thread. Run main() from the canonical `webapp.server` module so the worker
+    # thread, the queue, and the studio submit path all share one module instance.
+    import webapp.server as _server
+    _server.main()

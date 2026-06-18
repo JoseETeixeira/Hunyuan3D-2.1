@@ -40,8 +40,10 @@ FACE_MODES = ("paint", "reface")
 FORMATS = ("glb", "fbx", "blend")
 SCHEMA_VERSION = 1
 
-# 3/4-corner azimuths + down-tilt (kept consistent with server.HYFACE_CORNER_CAMS / pipeline cameras).
-CORNER_AZ = {"fl": 45.0, "bl": 135.0, "br": 225.0, "fr": 315.0}
+# 3/4-corner azimuths + down-tilt (kept consistent with server.HYFACE_CORNER_CAMS). Hunyuan azimuth
+# is left-handed (see pipeline.PROJECTION_CAMS): +X=left, -X=right, +Y=front, -Y=back, so the camera
+# that frames each corner is fl=315, fr=45, bl=225, br=135.
+CORNER_AZ = {"fl": 315.0, "bl": 225.0, "br": 135.0, "fr": 45.0}
 CORNER_ELEV = float(os.environ.get("HYFACE_CORNER_ELEV", "45"))
 
 _STORE_LOCK = threading.RLock()
@@ -97,8 +99,63 @@ def _textured_glb(mid: str) -> Path:
     return _assert_within(OUTPUT_DIR / f"{mid}_textured.glb", OUTPUT_DIR)
 
 
+def _facerender_file(mid: str, view: str) -> Path:
+    return _model_dir(mid) / f"facerender_{view}.png"
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+# --------------------------------------------------------------------------- texture history
+def _history_dir(mid: str) -> Path:
+    d = _model_dir(mid) / "texture_history"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _snapshot_glb(mid: str, seq: int) -> Path:
+    return _assert_within(_history_dir(mid) / f"{int(seq)}.glb", _model_dir(mid))
+
+
+def _push_snapshot(mid: str, label: str) -> None:
+    """Snapshot the CURRENT textured GLB into the history stack (called after a completed texture op).
+    No-op if there is no current texture. Records the per-face state + stage so a restore can rebuild
+    the model row exactly."""
+    cur = _textured_glb(mid)
+    if not cur.exists():
+        return
+    with _STORE_LOCK:
+        data = _load(mid)
+        seq = int(data.get("textureSeq", 0))
+        shutil.copy2(cur, _snapshot_glb(mid, seq))
+        data.setdefault("textureHistory", []).append({
+            "seq": seq, "label": label, "ts": _now_ms(),
+            "faces": {v: dict(data["faces"][v]) for v in ALL_VIEWS},
+            "stage": data["textureStage"],
+        })
+        data["textureSeq"] = seq + 1
+        _save(mid, data)
+
+
+def _clear_history(mid: str) -> None:
+    """Drop every snapshot (used when the mesh is regenerated — old snapshots belong to a dead UV)."""
+    with _STORE_LOCK:
+        data = _load(mid)
+        try:
+            shutil.rmtree(_history_dir(mid))
+        except FileNotFoundError:
+            pass
+        data["textureHistory"] = []
+        data["textureSeq"] = 0
+        _save(mid, data)
+
+
+def _base_snapshot_seq(data: dict):
+    """Seq of the base snapshot to revert a single face toward: the earliest recorded snapshot
+    (base texturing is always the first texture op). Returns None if there is no history."""
+    hist = data.get("textureHistory") or []
+    return min((e["seq"] for e in hist), default=None)
 
 
 # --------------------------------------------------------------------------- persistence
@@ -112,6 +169,10 @@ def _default_data(mid: str, name: str) -> dict:
         "textureStage": "none",
         "meshConfig": None,
         "meshSourceView": None,
+        # Texture undo history: each completed base/reface/paint snapshots the whole-mesh texture GLB
+        # into texture_history/{seq}.glb plus a metadata entry here, so any prior step is restorable.
+        "textureHistory": [],
+        "textureSeq": 0,
         "createdAt": _now_ms(),
         "updatedAt": _now_ms(),
     }
@@ -172,6 +233,8 @@ def assemble_model(mid: str) -> dict:
         "texturedUrl": (f"/api/files/{mid}_textured.glb?v={ver}" if _textured_glb(mid).exists() else None),
         "textureStage": data["textureStage"],
         "meshSourceView": data.get("meshSourceView"),
+        "textureHistory": [{"seq": e["seq"], "label": e["label"], "ts": e["ts"], "stage": e["stage"]}
+                           for e in data.get("textureHistory", [])],
         "createdAt": data["createdAt"],
         "updatedAt": data["updatedAt"],
     }
@@ -271,6 +334,12 @@ def run_gpu_job(kind: str, sjid: str) -> None:
             else:
                 _gpu_reface(sjid, mid, j["_view"], j.get("_edit"), face_mode="reface",
                             ref_override=j.get("_image"))
+        elif kind == "studio_face_clear":
+            _gpu_face_clear(sjid, mid, j["_view"], j["_clear_seq"])
+        elif kind == "studio_face_render":
+            _gpu_face_render(sjid, mid, j["_view"])
+        elif kind == "studio_handpaint":
+            _gpu_handpaint(sjid, mid, j["_view"], j.get("_image"))
         complete_job(sjid, mid)
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -344,6 +413,7 @@ def _gpu_base(sjid: str, mid: str, cfg) -> None:
                           "textureViews": int(cfg.texture_views), "seed": int(cfg.seed),
                           "meshFaces": int(cfg.mesh_faces)}
     _save(mid, data)
+    _push_snapshot(mid, "Base texture")
 
 
 def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
@@ -376,6 +446,7 @@ def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
                           "octreeResolution": int(cfg.octree_resolution),
                           "seed": int(cfg.seed), "meshFaces": int(cfg.mesh_faces), "sourceView": view}
     _save(mid, data)
+    _clear_history(mid)  # snapshots belong to the previous mesh's UV; drop them
 
 
 def _gpu_reface(sjid: str, mid: str, view: str, edit, face_mode="reface", ref_override=None) -> None:
@@ -401,7 +472,9 @@ def _gpu_reface(sjid: str, mid: str, view: str, edit, face_mode="reface", ref_ov
         server.JOBS.pop(mid, None)
     data = _load(mid)
     data["faces"][view] = {"status": "done", "mode": "reface"}
+    data["textureStage"] = "complete"  # a per-face edit only runs on a textured model
     _save(mid, data)
+    _push_snapshot(mid, f"Reface {view}")
 
 
 def _gpu_paint_face(sjid: str, mid: str, view: str, edit, ref_override) -> None:
@@ -438,7 +511,77 @@ def _gpu_paint_face(sjid: str, mid: str, view: str, edit, ref_override) -> None:
                   mirror=server.AI_VIEW_MIRROR)
     data = _load(mid)
     data["faces"][view] = {"status": "done", "mode": "paint"}
+    data["textureStage"] = "complete"  # a per-face edit only runs on a textured model
     _save(mid, data)
+    _push_snapshot(mid, f"Paint {view}")
+
+
+def _gpu_face_clear(sjid: str, mid: str, view: str, seq: int) -> None:
+    """Revert ONE face to a prior snapshot (default: the base) by re-baking that face's region from
+    the snapshot GLB onto the current texture. Other faces stay as they are."""
+    from webapp import server
+    tag = VIEW_TO_TAG[view]
+    if not _textured_glb(mid).exists():
+        raise RuntimeError("model has no textured mesh")
+    snap = _snapshot_glb(mid, seq)
+    if not snap.exists():
+        raise RuntimeError("the snapshot to revert from is missing")
+    elev, azim = _cam_for(tag)
+    set_job(sjid, status="processing", progress=40)
+    worker = server._ensure_model()
+    src_render = worker.render_textured_view(str(snap), elev, azim)
+    set_job(sjid, status="processing", progress=70)
+    worker.reface(uid=mid, textured_glb_path=str(_textured_glb(mid)), elev=elev, azim=azim,
+                  view_image=src_render.convert("RGB"), depth_band=1.0, mask=None, mirror=False)
+    data = _load(mid)
+    snap_entry = next((e for e in data.get("textureHistory", []) if e["seq"] == seq), None)
+    data["faces"][view] = dict(snap_entry["faces"][view]) if snap_entry else {"status": "done", "mode": "paint"}
+    data["textureStage"] = "complete"
+    _save(mid, data)
+    _push_snapshot(mid, f"Clear {view}")
+
+
+def _gpu_face_render(sjid: str, mid: str, view: str) -> None:
+    """Render the CURRENT textured face at its camera into facerender_{view}.png — the backdrop the
+    hand-paint canvas draws on. Reused if already newer than the textured GLB (cheap repeat opens)."""
+    from webapp import server
+    glb = _textured_glb(mid)
+    if not glb.exists():
+        raise RuntimeError("model has no textured mesh")
+    out = _facerender_file(mid, view)
+    if out.exists() and out.stat().st_mtime >= glb.stat().st_mtime:
+        return  # backdrop already current
+    elev, azim = _cam_for(VIEW_TO_TAG[view])
+    set_job(sjid, status="processing", progress=40)
+    worker = server._ensure_model()
+    img = worker.render_textured_view(str(glb), elev, azim)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    img.convert("RGB").save(out)
+
+
+def _gpu_handpaint(sjid: str, mid: str, view: str, overlay_path: str) -> None:
+    """Bake a hand-painted overlay (RGBA, alpha = strokes) onto the face at its camera."""
+    from webapp import server
+    if not _textured_glb(mid).exists():
+        raise RuntimeError("model has no textured mesh")
+    if not (overlay_path and os.path.exists(overlay_path)):
+        raise RuntimeError("no painted overlay provided")
+    elev, azim = _cam_for(VIEW_TO_TAG[view])
+    set_job(sjid, status="processing", progress=40)
+    worker = server._ensure_model()
+    overlay = Image.open(overlay_path).convert("RGBA")
+    set_job(sjid, status="processing", progress=70)
+    worker.paint_overlay(uid=mid, textured_glb_path=str(_textured_glb(mid)), elev=elev, azim=azim,
+                         overlay=overlay)
+    data = _load(mid)
+    data["faces"][view] = {"status": "done", "mode": "paint"}
+    data["textureStage"] = "complete"
+    _save(mid, data)
+    _push_snapshot(mid, f"Hand paint {view}")
+    try:  # face changed -> drop the stale backdrop so the next open re-renders
+        _facerender_file(mid, view).unlink()
+    except FileNotFoundError:
+        pass
 
 
 # --------------------------------------------------------------------------- request models
@@ -724,6 +867,99 @@ async def edit_face(mid: str, view: str, mode: str = Form(...), edit_prompt: str
     data["faces"][view]["status"] = "texturing"
     _save(mid, data)
     submit_gpu("studio_face_edit", sjid)
+    return public_job(sjid)
+
+
+# --------------------------------------------------------------------------- routes: texture history
+@router.post("/api/models/{mid}/texture/restore/{seq}")
+def restore_texture(mid: str, seq: int):
+    """Roll the whole-mesh texture back to a prior snapshot. Instant (file copy) — re-texture forward
+    from here. Later snapshots are kept, so you can jump around the timeline."""
+    _vid(mid)
+    snap = _snapshot_glb(mid, seq)
+    with _STORE_LOCK:
+        data = _load(mid)
+        entry = next((e for e in data.get("textureHistory", []) if e["seq"] == seq), None)
+        if entry is None or not snap.exists():
+            raise HTTPException(status_code=404, detail="Snapshot not found")
+        shutil.copy2(snap, _textured_glb(mid))
+        data["faces"] = {v: dict(entry["faces"][v]) for v in ALL_VIEWS}
+        data["textureStage"] = entry["stage"]
+        _save(mid, data)
+    return assemble_model(mid)
+
+
+@router.post("/api/models/{mid}/texture/reset")
+def reset_texture(mid: str):
+    """Delete the current texture back to the untextured mesh. History snapshots are kept (restorable)."""
+    _vid(mid)
+    with _STORE_LOCK:
+        data = _load(mid)
+        try:
+            _textured_glb(mid).unlink()
+        except FileNotFoundError:
+            pass
+        data["faces"] = {v: {"status": "pending", "mode": None} for v in ALL_VIEWS}
+        data["textureStage"] = "none"
+        _save(mid, data)
+    return assemble_model(mid)
+
+
+@router.post("/api/models/{mid}/faces/{view}/clear")
+def clear_face(mid: str, view: str):
+    """Revert ONE face back to the base texture (drops refaces/paints on that face). GPU re-bake."""
+    _vid(mid); _vview(view)
+    data = _load(mid)
+    if not _textured_glb(mid).exists():
+        raise HTTPException(status_code=400, detail="No texture to clear")
+    base_seq = _base_snapshot_seq(data)
+    if base_seq is None:
+        raise HTTPException(status_code=400, detail="No base snapshot to revert this face to")
+    sjid = new_job(f"Clearing {view}", mid)
+    set_job(sjid, _view=view, _clear_seq=base_seq)
+    data["faces"][view]["status"] = "texturing"
+    _save(mid, data)
+    submit_gpu("studio_face_clear", sjid)
+    return public_job(sjid)
+
+
+# --------------------------------------------------------------------------- routes: hand paint
+@router.post("/api/models/{mid}/faces/{view}/render")
+def render_face(mid: str, view: str):
+    """Render the current textured face into a PNG backdrop for the hand-paint canvas. Poll the job;
+    on completion fetch GET faces/{view}/render-image."""
+    _vid(mid); _vview(view)
+    if not _textured_glb(mid).exists():
+        raise HTTPException(status_code=400, detail="Run base texturing first")
+    sjid = new_job(f"Rendering {view}", mid)
+    set_job(sjid, _view=view)
+    submit_gpu("studio_face_render", sjid)
+    return public_job(sjid)
+
+
+@router.get("/api/models/{mid}/faces/{view}/render-image")
+def face_render_image(mid: str, view: str):
+    _vid(mid); _vview(view)
+    f = _facerender_file(mid, view)
+    if not f.exists():
+        raise HTTPException(status_code=404, detail="No render for this view")
+    return FileResponse(f, media_type="image/png", headers={"Cache-Control": "no-store"})
+
+
+@router.post("/api/models/{mid}/faces/{view}/handpaint")
+async def handpaint_face(mid: str, view: str, overlay: UploadFile = File(...)):
+    """Bake a hand-painted overlay (transparent except the brushed strokes) onto this face.  → Job"""
+    _vid(mid); _vview(view)
+    if not _textured_glb(mid).exists():
+        raise HTTPException(status_code=400, detail="Run base texturing first")
+    overlay_path = str(_model_dir(mid) / f"handpaint_{view}.png")
+    _save_upload_png(await overlay.read(), Path(overlay_path))
+    sjid = new_job(f"Hand painting {view}", mid)
+    set_job(sjid, _view=view, _image=overlay_path)
+    data = _load(mid)
+    data["faces"][view]["status"] = "texturing"
+    _save(mid, data)
+    submit_gpu("studio_handpaint", sjid)
     return public_job(sjid)
 
 
