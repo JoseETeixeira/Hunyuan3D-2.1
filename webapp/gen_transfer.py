@@ -171,7 +171,7 @@ def _is_h_mirrored(out_img, base_img, margin=0.03):
     return iou(so[:, ::-1], sb) > iou(so, sb) + margin
 
 
-def restyle_to_references(base_render, ref_paths, max_refs=3):
+def restyle_to_references(base_render, ref_paths, max_refs=3, extra_prompt=None):
     """Reface restyle: push the reference images' look onto a REAL textured-mesh render while holding
     its geometry EXACTLY. Two stages:
 
@@ -186,6 +186,8 @@ def restyle_to_references(base_render, ref_paths, max_refs=3):
     `base_render` is the current mesh rendered at the face camera. Accepts paths/PIL; returns a PIL image."""
     base = _open(base_render)
     refs = [_open(r) for r in (ref_paths or [])][:max_refs]
+    _tweak = (f"User adjustment to apply (keep Image 1's geometry, viewpoint and layout): "
+              f"{extra_prompt.strip()}. " if (extra_prompt and extra_prompt.strip()) else "")
 
     # Stage 1 — gpt-image-2 recolours the base render toward the references (skip if no refs; fall back
     # to the raw refs if it fails). Geometry drift here is harmless: it is only a colour reference.
@@ -198,7 +200,7 @@ def restyle_to_references(base_render, ref_paths, max_refs=3):
             "reference colour differs from Image 1's current colour, RECOLOUR the object to match it (a car "
             "the reference shows white becomes white); where they already agree, just clean it up. Keep "
             "Image 1's composition, the objects present and their positions; do NOT add, remove or move "
-            "anything. Plain white background. " + CARTOON_STYLE)
+            "anything. Plain white background. " + _tweak + CARTOON_STYLE)
         try:
             color_ref = edit_image([base] + refs, gpt_prompt, size=(S, S), prefer="openai")
         except Exception:  # noqa: BLE001
@@ -214,7 +216,7 @@ def restyle_to_references(base_render, ref_paths, max_refs=3):
         "PIXEL-FOR-PIXEL (the result must overlay Image 1 exactly), taking the colours, materials and "
         "shading from the reference by position (recolour where they differ, refine where they agree). Do "
         "NOT adopt the references' viewpoint, scale or layout; do NOT move, resize, add, remove or reshape "
-        "anything from Image 1. Plain pure-white background. " + CARTOON_STYLE)
+        "anything from Image 1. Plain pure-white background. " + _tweak + CARTOON_STYLE)
     out = edit_image([base] + col_inputs, prompt, size=(S, S), prefer="gemini")
     # The model occasionally mirrors a side view (left<->right) while restyling. base is the real mesh
     # render — ground truth and in back_project's handedness — so undo any flip against it, else the

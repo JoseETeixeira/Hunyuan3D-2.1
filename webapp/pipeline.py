@@ -575,6 +575,45 @@ class TextureWorker:
         return textured_path
 
     @torch.inference_mode()
+    def paint_single_view(self, shape_glb_path: str, ref, elev: float, azim: float, tex_resolution: int = None):
+        """Per-face AI paint for ONE face: run single-view Hunyuan paint on `ref` at (elev, azim)
+        and return the painted albedo (PIL). Same single-view paint as paint_faces (one
+        normal+position control -> num_view=1), but returns the 2D albedo so the caller can
+        composite it onto an existing texture (localized per-face edit) instead of baking a fresh
+        shared UV. No bake here."""
+        import trimesh
+        from PIL import Image
+        from utils.uvwrap_utils import mesh_uv_wrap
+
+        if tex_resolution:
+            self.paint_pipeline.config.resolution = int(tex_resolution)
+        pp = self.paint_pipeline
+        render_size = pp.config.render_size
+        res = pp.config.resolution
+
+        mesh = trimesh.load(shape_glb_path, force="mesh")
+        mesh = mesh_uv_wrap(mesh)
+        pp.render.load_mesh(mesh=mesh)
+        if self.sequential_vram:
+            self._move_multiview("cuda")
+        mv = pp.models["multiview_model"]
+        normal = pp.view_processor.render_normal_multiview([float(elev)], [float(azim)], use_abs_coor=True)[0]
+        position = pp.view_processor.render_position_multiview([float(elev)], [float(azim)])[0]
+        if getattr(ref, "mode", None) == "RGBA":
+            white = Image.new("RGB", ref.size, (255, 255, 255))
+            white.paste(ref, mask=ref.getchannel("A"))
+            ref_rgb = white
+        else:
+            ref_rgb = ref.convert("RGB")
+        pbr = mv([ref_rgb], [normal, position], prompt="high quality", custom_view_size=res, resize_input=True)
+        albedo = pp.models["super_model"](pbr["albedo"][0]).resize((render_size, render_size))
+        if self.sequential_vram:
+            self._move_multiview("cpu")
+        if self.low_vram_mode:
+            torch.cuda.empty_cache()
+        return albedo
+
+    @torch.inference_mode()
     def reface(self, uid: str, textured_glb_path: str, elev: float, azim: float, view_image,
                depth_band: float = 1.0, mask=None, mirror: bool = False):
         """Depth-aware single-view re-texture of an ALREADY-textured mesh.

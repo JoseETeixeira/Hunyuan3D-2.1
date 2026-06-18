@@ -25,6 +25,9 @@ services:
     environment:
       - HF_HOME=/root/.cache/huggingface
       - HY3D_OUTPUT_DIR=/workspace/Hunyuan3D-2.1/webapp/outputs
+      # Serve the built Next.js per-model studio (static export copied to webapp/webui by
+      # `pnpm build` + copy). Lives under the ./webapp bind mount, so no extra volume needed.
+      - HY3D_WEBUI_DIR=/workspace/Hunyuan3D-2.1/webapp/webui
       - OPENAI_API_KEY=${OPENAI_API_KEY}  # gpt-image-2 texturing + projection AI-fill; set in .env or your shell.
       - HF_TOKEN=${HF_TOKEN:-}            # authenticated HF downloads (faster, no rate-limit throttle)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # Gemini "nano banana" image-edit fallback for gpt-image-2

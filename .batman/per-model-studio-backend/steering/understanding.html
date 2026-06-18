@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Per-Model 3D Studio — Current State & Change Surface</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Fira+Code:wght@400;500&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#0f1722; --grid:rgba(120,160,200,.06); --surface:#16202e; --surface2:#1b2738;
+  --border:rgba(150,180,210,.14); --text:#dfe8f2; --dim:#8da3bd;
+  --teal:#2dd4bf; --teal-d:rgba(45,212,191,.12);
+  --blue:#4aa3df; --blue-d:rgba(74,163,223,.12);
+  --amber:#e0a13a; --amber-d:rgba(224,161,58,.12);
+  --rose:#e06a72; --rose-d:rgba(224,106,114,.12);
+  --green:#7bbf5a; --green-d:rgba(123,191,90,.12);
+}
+@media (prefers-color-scheme: light){
+  :root{ --bg:#eef2f6; --grid:rgba(40,70,110,.07); --surface:#ffffff; --surface2:#f4f7fa;
+  --border:rgba(20,50,90,.14); --text:#16242f; --dim:#5a7088; }
+}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);
+  background-image:linear-gradient(var(--grid) 1px,transparent 1px),linear-gradient(90deg,var(--grid) 1px,transparent 1px);
+  background-size:26px 26px;color:var(--text);font-family:"DM Sans",system-ui,sans-serif;line-height:1.5;}
+.wrap{max-width:1120px;margin:0 auto;padding:48px 24px 80px}
+.label{font-family:"Fira Code",monospace;font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--dim);display:flex;align-items:center;gap:8px;margin:0 0 14px}
+.label::before{content:"";width:8px;height:8px;border-radius:2px;background:var(--teal)}
+h1{font-size:34px;font-weight:700;margin:0 0 6px;letter-spacing:-.02em}
+.sub{color:var(--dim);font-size:15px;max-width:760px;margin:0 0 8px}
+.lead{font-size:17px;color:var(--text);max-width:820px;border-left:3px solid var(--teal);padding:2px 0 2px 16px;margin:24px 0 8px}
+.meta{font-family:"Fira Code",monospace;font-size:12px;color:var(--dim);margin-top:14px}
+section{margin-top:46px}
+h2{font-size:13px;font-family:"Fira Code",monospace;letter-spacing:.14em;text-transform:uppercase;color:var(--text);border-bottom:1px solid var(--border);padding-bottom:8px;margin:0 0 18px}
+.grid{display:grid;gap:14px}
+.g3{grid-template-columns:repeat(3,1fr)} .g2{grid-template-columns:repeat(2,1fr)}
+@media(max-width:820px){.g3,.g2{grid-template-columns:1fr}}
+.card{background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:16px 18px;min-width:0}
+.card h3{margin:0 0 6px;font-size:15px;display:flex;align-items:center;gap:8px}
+.card p{margin:0;color:var(--dim);font-size:13.5px;overflow-wrap:break-word}
+.tag{font-family:"Fira Code",monospace;font-size:10px;padding:2px 7px;border-radius:5px;border:1px solid var(--border);color:var(--dim)}
+.dot{width:9px;height:9px;border-radius:50%;flex:none}
+.d-teal{background:var(--teal)} .d-blue{background:var(--blue)} .d-amber{background:var(--amber)} .d-rose{background:var(--rose)} .d-green{background:var(--green)}
+code{font-family:"Fira Code",monospace;font-size:.86em;background:var(--surface2);padding:1px 5px;border-radius:4px;color:var(--teal)}
+.flow{display:flex;align-items:stretch;gap:0;flex-wrap:wrap}
+.step{flex:1;min-width:150px;background:var(--surface);border:1px solid var(--border);border-radius:10px;padding:14px 16px;position:relative}
+.step .n{font-family:"Fira Code",monospace;font-size:11px;color:var(--teal);font-weight:500}
+.step h4{margin:4px 0 4px;font-size:14px}
+.step p{margin:0;font-size:12.5px;color:var(--dim)}
+.arrow{display:flex;align-items:center;color:var(--dim);font-size:22px;padding:0 6px}
+@media(max-width:820px){.arrow{transform:rotate(90deg);justify-content:center;width:100%}}
+table{width:100%;border-collapse:collapse;font-size:13px;background:var(--surface);border:1px solid var(--border);border-radius:10px;overflow:hidden}
+th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+th{font-family:"Fira Code",monospace;font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);background:var(--surface2)}
+tr:last-child td{border-bottom:none}
+td code{white-space:nowrap}
+.pill{font-family:"Fira Code",monospace;font-size:10.5px;padding:2px 8px;border-radius:20px;display:inline-block}
+.keep{background:var(--green-d);color:var(--green);border:1px solid var(--green)}
+.rm{background:var(--rose-d);color:var(--rose);border:1px solid var(--rose)}
+.new{background:var(--teal-d);color:var(--teal);border:1px solid var(--teal)}
+.banner{background:var(--amber-d);border:1px solid var(--amber);border-radius:10px;padding:16px 18px}
+.banner h3{margin:0 0 6px;color:var(--amber);font-size:15px}
+.banner p{margin:0;font-size:13.5px;color:var(--text)}
+ul.q{list-style:none;padding:0;margin:0;display:grid;gap:8px}
+ul.q li{background:var(--surface);border:1px solid var(--border);border-left:3px solid var(--blue);border-radius:8px;padding:10px 14px;font-size:13.5px}
+ul.q li b{color:var(--text)}
+.dep{font-family:"Fira Code",monospace;font-size:12.5px}
+.dep .v{color:var(--teal)} .dep .arr{color:var(--dim)} .dep .in{color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <p class="label">Batman Phase 1 · Understanding · per-model-studio-backend</p>
+  <h1>Per-Model 3D Studio — Wire the New Frontend to the Backend</h1>
+  <p class="sub">Current state of the Hunyuan3D-2.1 <code>webapp</code> backend, the new Next.js per-model contract, and the gap between them.</p>
+  <p class="lead">The new Next.js frontend is a clean <b>per-model</b> studio backed today only by an in-memory mock. The webapp backend already has the hard parts — Hunyuan shape gen, <b>per-face AI paint (hyface)</b>, <b>depth-aware reface</b>, gpt-image-2 / Gemini synthesis — but exposes a flat, per-run, job-keyed API with <b>no model identity</b> and no mesh-free reference generation. The work is an orchestration + persistence layer, a step-2 reference generator, and a mode cleanup.</p>
+  <p class="meta">Backend: Hunyuan3D-2.1/webapp/server.py (100KB) + pipeline.py (50KB) · Frontend: Downloads/3-d-model-generation-workflow · Architecture change: REQUIRED</p>
+
+  <section>
+    <h2>Current backend pipeline (webapp)</h2>
+    <div class="flow">
+      <div class="step"><div class="n">POST /api/generate</div><h4>Shape job</h4><p>Single GPU worker → Hunyuan <code>hy3dshape</code> → <code>{uid}_shape.glb</code></p></div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="n">/jobs/:id/texture</div><h4>Texture dispatch</h4><p><code>_run_texture</code> switches on <code>texture_mode</code> (7 modes)</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="n">paint_faces / reface</div><h4>Bake</h4><p>Per-face AI paint or single-face reface → shared UV, albedo-matte</p></div>
+      <div class="arrow">→</div>
+      <div class="step"><div class="n">fill_coverage_gaps</div><h4>Gap-fill</h4><p>Auto-paint oblique texels no camera covers · <code>{uid}_textured.glb</code></p></div>
+    </div>
+    <div class="grid g3" style="margin-top:14px">
+      <div class="card"><h3><span class="dot d-blue"></span>State = files, not models</h3><p>In-memory <code>JOBS</code> dict (wiped on restart) + flat <code>{uid}_*.glb/png</code>. <code>/api/gallery</code> globs the disk. <b>No name→artifacts index, no DB, no params provenance.</b></p></div>
+      <div class="card"><h3><span class="dot d-teal"></span>Reusable primitives</h3><p><code>generate_shape</code>, <code>paint_faces(view_specs)</code>, <code>reface(elev,azim,...)</code>, <code>fill_coverage_gaps</code> — all angle-generic. Callable from a new orchestration layer.</p></div>
+      <div class="card"><h3><span class="dot d-amber"></span>Two reference channels</h3><p>Named per-side fields (front…br) → <code>view_paths</code> (hyface). Parallel <code>reference[]</code>+<code>reference_side[]</code> (reface, gpt modes). Wrong channel = silently dropped.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>New per-model contract (frontend → must build)</h2>
+    <table>
+      <thead><tr><th>Endpoint</th><th>Returns</th><th>Maps to backend</th></tr></thead>
+      <tbody>
+        <tr><td><code>GET/POST /api/models</code>, <code>:id</code>, PATCH, DELETE</td><td>Model / ModelSummary</td><td><span class="pill new">NEW registry</span> name→refs+mesh+texture, persisted</td></tr>
+        <tr><td><code>POST /references/:view/generate</code></td><td>Job → Model</td><td><span class="pill new">NEW</span> mesh-free gpt-image-2 per-view (staged graph)</td></tr>
+        <tr><td><code>POST /references/:view/upload · /approve</code></td><td>Model</td><td><span class="pill new">NEW</span> store + auto-approve / approve</td></tr>
+        <tr><td><code>POST /texture/base</code></td><td>Job → Model</td><td><code>generate_shape</code> + <code>hyface</code> (front ref only)</td></tr>
+        <tr><td><code>POST /texture/reface/:view</code></td><td>Job → Model</td><td><code>reface</code> with that view's approved reference</td></tr>
+        <tr><td><code>POST /faces/:view/edit</code></td><td>Job → Model</td><td>mode = paint(<code>hyface</code>) | reface</td></tr>
+        <tr><td><code>GET /api/jobs/:id</code></td><td>Job (+ full Model on done)</td><td>job poller — <b>completed job MUST embed Model</b></td></tr>
+        <tr><td><code>GET /download/:fmt</code> glb·fbx·blend</td><td>file</td><td>existing Blender convert</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Step-2 reference generation — imperative dependency graph</h2>
+    <div class="grid g3">
+      <div class="card"><h3><span class="dot d-teal"></span>Stage 1</h3><p class="dep"><span class="v">front</span> <span class="arr">←</span> <span class="in">seed image</span></p></div>
+      <div class="card"><h3><span class="dot d-blue"></span>Stage 2 · cardinals</h3><p class="dep"><span class="v">left, right, top, bottom, back</span> <span class="arr">←</span> <span class="in">front + seed</span></p></div>
+      <div class="card"><h3><span class="dot d-amber"></span>Stage 3 · corners</h3><p class="dep"><span class="v">fl, fr</span> <span class="arr">←</span> <span class="in">front+left+right+top</span><br><span class="v">bl, br</span> <span class="arr">←</span> <span class="in">back+left+right+top</span></p></div>
+    </div>
+    <div class="grid g2" style="margin-top:14px">
+      <div class="card"><h3><span class="dot d-green"></span>Reuse</h3><p><code>image_edit.edit_image()</code> (OpenAI→Gemini wrapper) and the <code>generate_elevations</code> "grow the context list" pattern for cross-view consistency.</p></div>
+      <div class="card"><h3><span class="dot d-rose"></span>Gap</h3><p>Only <code>generate_elevations</code> is mesh-free, but it is building-specific, <b>skips bottom</b>, and produces <b>no corners</b>. Every other view-gen path needs a rendered mesh — unusable pre-mesh. Need generic per-view prompts (orthographic, cartoonish, "only this view's faces", rotation desc) + tweak-prompt.</p></div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Texture mode cleanup</h2>
+    <table>
+      <thead><tr><th>Mode</th><th>Action</th><th>Notes</th></tr></thead>
+      <tbody>
+        <tr><td><code>hyface</code> (per-face AI paint)</td><td><span class="pill keep">KEEP</span></td><td>= frontend "paint"; base texture + per-face edit</td></tr>
+        <tr><td><code>reface</code></td><td><span class="pill keep">KEEP</span></td><td>= frontend "reface"; depth-aware single face</td></tr>
+        <tr><td><code>hunyuan</code> (default PBR)</td><td><span class="pill rm">REMOVE?</span></td><td>fall-through default — needs new default; confirm</td></tr>
+        <tr><td><code>projection · gptproject</code></td><td><span class="pill rm">REMOVE</span></td><td>keep shared <code>gpt_angles</code> field (hyface reuses)</td></tr>
+        <tr><td><code>mvadapter · mvgpt</code></td><td><span class="pill rm">REMOVE</span></td><td>keep <code>gen_transfer.py</code>/<code>blender_project.py</code> (shared); drop <code>/resume</code>, health mvadapter flag</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <section>
+    <h2>Architecture change — required</h2>
+    <div class="banner">
+      <h3>Stop before implementation — present options in Design</h3>
+      <p>This adds a <b>persistence layer</b> (per-model registry), a <b>new public REST surface</b> with a Model aggregate + job→model contract, a <b>mesh-free reference generator</b>, an <b>execution decision</b> (network-bound gpt-image vs the single GPU queue), a <b>deployment/origin change</b> (serving the Next.js app same-origin as <code>/api/*</code>), and <b>removes texture modes</b>. Each needs validated trade-offs.</p>
+    </div>
+  </section>
+
+  <section>
+    <h2>Open questions to resolve</h2>
+    <ul class="q">
+      <li><b>Persistence:</b> per-model JSON sidecar + index (recommended), SQLite, or extend gallery glob?</li>
+      <li><b>Where step-2 generation runs:</b> through the GPU queue (blocks GPU) or a separate async path (recommended — gpt-image is not GPU)?</li>
+      <li><b>/texture/base semantics:</b> shape + hyface using <b>front reference only</b> (rest via gap-fill, then reface)? Mock implies yes.</li>
+      <li><b>Reface inputs:</b> reface a view using its <b>approved step-2 reference</b> (not a fresh upload)?</li>
+      <li><b>Deployment:</b> FastAPI serves the built Next.js app vs proxy vs Next rewrites for same-origin <code>/api/*</code>.</li>
+      <li><b>Default-mode removal:</b> drop Hunyuan PBR from API/UI but keep the pipeline method, or remove entirely?</li>
+    </ul>
+  </section>
+</div>
+</body>
+</html>

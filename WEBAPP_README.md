@@ -70,6 +70,63 @@ Browser (static SPA)  ──HTTP──►  FastAPI  ──►  single GPU worker
 
 Job status flow: `queued → processing_shape → shape_ready → queued_texture → processing_texture → completed` (or `failed`).
 
+## Per-Model Studio (current frontend)
+
+The current frontend is a Next.js **per-model** studio (`webapp/studio.py` +
+`webapp/reference_views.py`). A *model* is a durable, named aggregate (10 reference views, mesh,
+texture) persisted at `outputs/models/{id}/model.json` — reusable across runs and process restarts.
+Texturing is limited to **per-face AI paint (`hyface`)** and **`reface`**; the older modes
+(`hunyuan`, `projection`, `gptproject`, `mvadapter`, `mvgpt`) were removed.
+
+Flow: create a model → upload a seed → generate the 10 reference views with gpt-image-2 along the
+dependency graph (front → cardinals → corners), approving/tweaking each → `texture/base` (mesh +
+per-face AI paint over all approved refs; reaches `complete`) → optional per-face `reface`/`paint`
+edits → download glb/fbx/blend.
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| `GET/POST` | `/api/models` | list / create (multipart `name`, optional `seed_image`) |
+| `GET/PATCH/DELETE` | `/api/models/{id}` | fetch / rename (`{name}`) / delete |
+| `POST` | `/api/models/{id}/references/{view}/generate` | gpt-image-2 view (`{edit_prompt?}`) → Job |
+| `POST` | `/api/models/{id}/references/{view}/upload` | upload a custom view (auto-approved) |
+| `POST` | `/api/models/{id}/references/{view}/approve` | approve a generated view |
+| `GET`  | `/api/models/{id}/references/{view}/image`, `/seed` | reference / seed PNG |
+| `POST` | `/api/models/{id}/texture/base` | mesh + per-face AI paint (MeshConfig) → Job |
+| `POST` | `/api/models/{id}/texture/reface/{view}` | depth-aware reface (`{edit_prompt?}`) → Job |
+| `POST` | `/api/models/{id}/faces/{view}/edit` | `mode=paint\|reface`, `edit_prompt?`, `image?` → Job |
+| `GET`  | `/api/jobs/{id}` | job status; completed jobs embed the full `Model` |
+| `GET`  | `/api/models/{id}/download/{fmt}` | `glb` \| `fbx` \| `blend` |
+
+Views: `front, back, left, right, top, bottom, front-left, front-right, back-left, back-right`.
+`texture/base` requires all 10 references approved and runs on the GPU worker; reference generation
+runs on a separate network lane (gpt-image-2 / Gemini; needs `OPENAI_API_KEY` and/or
+`GEMINI_API_KEY`).
+
+### Serving the Next.js frontend same-origin
+
+```bash
+# in the Next.js app:  next build  (next.config has output: 'export')  ->  out/
+HY3D_WEBUI_DIR=/path/to/app/out python -m webapp.server --port 8080 --preload
+```
+
+FastAPI serves the static export at `/` (mounted after `/api/*`), so the app's relative `/api/*`
+calls resolve same-origin. Set `NEXT_PUBLIC_USE_MOCK=false` for the built app. If `HY3D_WEBUI_DIR`
+is unset, the bundled (legacy) static UI is served instead.
+
+### Docker
+
+`docker-compose.yml` already sets `HY3D_WEBUI_DIR=/workspace/Hunyuan3D-2.1/webapp/webui` (under the
+live `./webapp` bind mount), so you only need to drop the built export there — no image rebuild:
+
+```bash
+# 1) build the export and copy it under the bind mount
+cd /path/to/3-d-model-generation-workflow && NEXT_PUBLIC_USE_MOCK=false pnpm build
+cp -r out/. /path/to/Hunyuan3D-2.1/webapp/webui/
+# 2) run (keys in Hunyuan3D-2.1/.env: OPENAI_API_KEY / GEMINI_API_KEY / HF_TOKEN)
+cd /path/to/Hunyuan3D-2.1 && docker compose up -d
+# open http://localhost:8080  (logs: docker compose logs -f ; stop: docker compose down)
+```
+
 ## Run without Docker
 
 From the repo root, inside the Hunyuan3D-2.1 conda env (see `docker/Dockerfile` for the
