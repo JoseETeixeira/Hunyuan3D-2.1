@@ -3,31 +3,6 @@
 ## Unreleased
 
 ### Added
-- Web app: auto **coverage-gap fill** for `reface` and `hyface` (default ON). After the base
-  bake, texels no standard view covered — normals grazing every camera >75° (the
-  `bake_angle_thres` gate) OR occluded behind another part — are blank and get smeared by UV
-  inpaint (the oblique ramp/facade walls). This stage re-probes the 10 standard cameras' real
-  coverage (`back_project` a dummy → accumulate `cos_map` → gap = valid & ~covered, catching both
-  grazing AND occlusion), greedily aims a capped set of extra fill cameras at the uncovered
-  normals, gets a reference per camera, and composites the paint ONLY onto the gap region (+ a
-  small dilation) so covered texels are untouched. Projection bake only (no diffusion UNet).
-  - `webapp/pipeline.py`: new `TextureWorker.fill_coverage_gaps` (runs as an auto-targeted reface
-    on the reloaded textured GLB — one path shared by both modes).
-  - `webapp/gapfill_logic.py`: pure (numpy) camera-ranking core (`best_candidate`), unit-tested.
-  - `webapp/server.py`: gap-fill wired into `_run_reface` + `_run_hyface` (best-effort, non-fatal —
-    the base bake still ships on any failure); `_gap_reference` ladder (gpt/Gemini synth from the
-    gap geometry + nearest colour refs → reuse nearest ref → skip), `_nearest_face_imgs`,
-    `_gapfill_camera_sets`.
-  - Reference per gap camera: reface uses the user's references; hyface uses the nearest
-    already-painted faces; both degrade gracefully without `OPENAI_API_KEY` (reuse nearest ref).
-  - Tunable via `GAPFILL_REFACE`/`GAPFILL_HYFACE` (default 1), `GAPFILL_MAX_CAMS` (6),
-    `GAPFILL_DILATION` (4), `GAPFILL_COS_DEG` (75), `GAPFILL_MIN_TEXELS` (64),
-    `GAPFILL_GRID_ELEVS` (`-60,-30,0,30,60`), `GAPFILL_GRID_AZ_STEP` (30). Set the per-mode toggle
-    to 0 for exact legacy behavior.
-  - Verify: `python webapp/diag_gapfill.py <uid>` (dumps the gap mask + coverage counts);
-    `python webapp/test_gapfill_logic.py` (pure unit tests for the selection core).
-  - Additive only — other modes (`hunyuan`, `projection`, `gptproject`, `mvadapter`, `mvgpt`) are
-    unchanged.
 - Web app: new `hyface` texture mode — "Per-face AI paint (Hunyuan)". Paints each
   face/side of the model individually with single-view Hunyuan paint, conditioned on
   that face's own uploaded reference (front = main image; back/left/right/top/bottom

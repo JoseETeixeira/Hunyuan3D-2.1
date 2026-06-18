@@ -202,21 +202,6 @@ _HYFACE_BLENDER_BAKE = os.environ.get("HYFACE_BLENDER_BAKE", "0").lower() not in
 # Only the below-horizon fills are re-baked via blender (their cameras carry the down-facing guard).
 _HYFACE_BAKE_SIDES = {"front_lo", "back_lo", "left_lo", "right_lo", "fl_lo", "fr_lo", "bl_lo", "br_lo"}
 
-# gapfill — auto coverage-gap fill. After the base bake, texels no standard view covered (normal grazes
-# every camera >75deg OR occluded) are blank -> UV-inpaint smears the neighbour colour onto them (the
-# oblique ramp/facade walls). This stage re-probes the standard cameras' real coverage, finds the gap
-# texels, aims a capped set of extra fill cameras at them, and bakes ONLY the gap region over the base.
-# Default ON for reface + hyface; set GAPFILL_REFACE / GAPFILL_HYFACE = 0 to revert to legacy behavior.
-_GAPFILL_REFACE = os.environ.get("GAPFILL_REFACE", "1").lower() not in ("0", "false", "no")
-_GAPFILL_HYFACE = os.environ.get("GAPFILL_HYFACE", "1").lower() not in ("0", "false", "no")
-_GAPFILL_MAX_CAMS = int(os.environ.get("GAPFILL_MAX_CAMS", "6"))      # hard cap on extra fill cameras
-_GAPFILL_DILATION = int(os.environ.get("GAPFILL_DILATION", "4"))      # gap-mask dilation (texels) for seam blend
-_GAPFILL_COS_DEG = float(os.environ.get("GAPFILL_COS_DEG", "75"))     # coverage gate (matches bake_angle_thres)
-_GAPFILL_MIN_TEXELS = int(os.environ.get("GAPFILL_MIN_TEXELS", "64")) # skip stage / early-stop below this many texels
-# Candidate fill cameras: elevations x azimuth step (oblique angles the 10 standard views lack).
-_GAPFILL_GRID_ELEVS = os.environ.get("GAPFILL_GRID_ELEVS", "-60,-30,0,30,60")
-_GAPFILL_GRID_AZ_STEP = int(os.environ.get("GAPFILL_GRID_AZ_STEP", "30"))
-
 
 def _prep_view(worker, img, remove_bg: bool, flip: bool):
     """Isolate the subject (rembg -> clean alpha so placement fits the silhouette) and
@@ -276,72 +261,6 @@ def _openai_paint_view(geometry_img, reference_imgs, angle: str):
         "matching the framing and scale of Image 1. " + CARTOON_STYLE + " " + CONSISTENCY_RULE
     )
     return edit_image([geometry_img, *reference_imgs], prompt, size=(1024, 1024))
-
-
-def _cam_lookat(worker, elev, azim):
-    """World-space view direction for (elev,azim) matching the renderer's bake convention
-    (camera-space lookat [0,0,-1] -> world L = -R[2,:]). Distance-independent."""
-    import numpy as np
-    from DifferentiableRenderer.camera_utils import get_mv_matrix
-    cd = worker.paint_pipeline.render.camera_distance
-    r = np.asarray(get_mv_matrix(elev=float(elev), azim=float(azim), camera_distance=cd, center=None),
-                   dtype=np.float32)
-    return -r[2, :3]
-
-
-def _standard_cam_table(worker):
-    """label -> (elev,azim) for the 10 standard views (6 cardinals + 4 corners)."""
-    table = {lbl: (float(e), float(a)) for lbl, (e, a) in worker.PROJECTION_CAMS.items()}
-    for lbl, (az, _faces) in HYFACE_CORNER_CAMS.items():
-        table[lbl] = (float(_HYFACE_CORNER_ELEV), float(az))
-    return table
-
-
-def _nearest_face_imgs(worker, elev, azim, face_imgs_by_label, k=3):
-    """Return up to k already-painted standard-face images whose camera best aligns with the
-    gap camera's view direction (closest lookat first). Seeds synth and the offline fallback."""
-    import numpy as np
-    if not face_imgs_by_label:
-        return []
-    L = _cam_lookat(worker, elev, azim)
-    table = _standard_cam_table(worker)
-    scored = []
-    for lbl, img in face_imgs_by_label.items():
-        if img is None or lbl not in table:
-            continue
-        fe, fa = table[lbl]
-        scored.append((float(np.dot(L, _cam_lookat(worker, fe, fa))), img))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [img for _, img in scored[:k]]
-
-
-def _gap_reference(worker, geom_img, color_refs):
-    """Reference ladder for a gap fill camera. `geom_img` = the gap camera's geometry (normal) render,
-    supplied by fill_coverage_gaps so this never touches the shared renderer. `color_refs` = color
-    source images (user refs / nearest painted faces / nearest textured renders).
-    (1) gpt/gemini synth from the geometry + color refs; (2) reuse the first color ref; (3) None -> skip.
-    """
-    if geom_img is not None and os.environ.get("OPENAI_API_KEY") and color_refs:
-        try:
-            painted = _openai_paint_view(geom_img, color_refs, "gap")
-            return _prep_view(worker, painted, remove_bg=True, flip=False)
-        except Exception as e:  # noqa: BLE001
-            print(f"[gapfill] synth ref failed ({e}); falling back to nearest colour ref")
-    if color_refs:
-        return color_refs[0]
-    return None
-
-
-def _gapfill_camera_sets(worker):
-    """(standard_cams, candidate_cams) for fill_coverage_gaps, built from env. Standard = the 10 named
-    views that DEFINE coverage; candidates = the oblique elev x azim grid (+ the standard angles)."""
-    standard = list(_standard_cam_table(worker).values())
-    elevs = [float(x) for x in _GAPFILL_GRID_ELEVS.split(",") if x.strip()]
-    step = max(1, _GAPFILL_GRID_AZ_STEP)
-    candidate = [(e, float(a)) for e in elevs for a in range(0, 360, step)]
-    candidate += [c for c in standard if c not in candidate]
-    return standard, candidate
-
 
 FILE_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_(shape|textured)\.glb$")
 UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
@@ -1018,30 +937,6 @@ def _run_hyface(job_id):
                                                       base_glb=str(base_glb))
         except Exception as e:  # noqa: BLE001
             print(f"[server] hyface blender re-bake failed ({e}); keeping cosine bake")
-
-    # Auto gap-fill: cover oblique/recessed texels no standard view reached. Best-effort + non-fatal —
-    # on any failure the base bake above still ships. Reference per gap camera = gpt-synth from the
-    # camera geometry + the nearest already-painted faces, else the nearest face image, else skip.
-    if _GAPFILL_HYFACE:
-        try:
-            _set(job_id, status="processing_texture", progress=94, message="Covering oblique gaps")
-            # Coverage = the cameras hyface ACTUALLY painted (cardinals + tilts + corners + lows), not
-            # just the 10 named views, so texels a tilt/low view already covered are NOT re-flagged as gaps.
-            _, cand_cams = _gapfill_camera_sets(worker)
-            std_cams = sorted({(float(e), float(a)) for (_img, e, a, _w) in view_specs})
-
-            def _hy_gap_ref(e, a, geom_img):
-                return _gap_reference(worker, geom_img, _nearest_face_imgs(worker, e, a, face_refs))
-
-            textured_path = worker.fill_coverage_gaps(
-                uid=job_id, textured_glb_path=textured_path, get_reference=_hy_gap_ref,
-                standard_cams=std_cams, candidate_cams=cand_cams, max_cams=_GAPFILL_MAX_CAMS,
-                dilation_px=_GAPFILL_DILATION, cos_thres_deg=_GAPFILL_COS_DEG, min_texels=_GAPFILL_MIN_TEXELS,
-                progress=lambda k, cam, rem: _set(job_id, message=f"Gap camera {k} placed (remaining {rem})"),
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[server] hyface gap-fill failed ({e}); keeping base texture")
-
     _set(job_id, status="completed", progress=100, message="Done",
          textured_path=textured_path, textured_url=f"/api/files/{Path(textured_path).name}")
 
@@ -1105,33 +1000,6 @@ def _run_reface(job_id):
         uid=job_id, textured_glb_path=textured_glb, elev=elev, azim=azim, view_image=painted,
         depth_band=_REFACE_DEPTH_BAND, mask=mask_img, mirror=AI_VIEW_MIRROR,
     )
-
-    # Auto gap-fill on the refaced mesh: cover oblique texels no standard view reached. The user's
-    # references (always present in reface) seed the per-gap-camera synth; falls back to the first ref
-    # when no image-model key. Best-effort + non-fatal — the reface result above ships on any failure.
-    if _GAPFILL_REFACE:
-        try:
-            _set(job_id, status="processing_texture", progress=94, message="Covering oblique gaps")
-            std_cams, cand_cams = _gapfill_camera_sets(worker)
-            color_refs = []
-            for p in ref_paths:
-                try:
-                    color_refs.append(Image.open(p).convert("RGB"))
-                except Exception:  # noqa: BLE001
-                    pass
-
-            def _rf_gap_ref(e, a, geom_img):
-                return _gap_reference(worker, geom_img, color_refs)
-
-            textured_path = worker.fill_coverage_gaps(
-                uid=job_id, textured_glb_path=textured_path, get_reference=_rf_gap_ref,
-                standard_cams=std_cams, candidate_cams=cand_cams, max_cams=_GAPFILL_MAX_CAMS,
-                dilation_px=_GAPFILL_DILATION, cos_thres_deg=_GAPFILL_COS_DEG, min_texels=_GAPFILL_MIN_TEXELS,
-                progress=lambda k, cam, rem: _set(job_id, message=f"Gap camera {k} placed (remaining {rem})"),
-            )
-        except Exception as e:  # noqa: BLE001
-            print(f"[server] reface gap-fill failed ({e}); keeping reface result")
-
     _set(job_id, status="completed", progress=100, message="Done",
          textured_path=textured_path, textured_url=f"/api/files/{Path(textured_path).name}")
 
