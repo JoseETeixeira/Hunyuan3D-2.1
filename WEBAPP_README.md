@@ -120,7 +120,9 @@ live `./webapp` bind mount), so you only need to drop the built export there —
 
 ```bash
 # 1) build the export and copy it under the bind mount
-cd /path/to/3-d-model-generation-workflow && NEXT_PUBLIC_USE_MOCK=false pnpm build
+#    The UI source now lives in-repo at webapp/studio-ui/; its .env.production already sets
+#    NEXT_PUBLIC_USE_MOCK=false, so a plain `pnpm build` talks to the real /api/* backend.
+cd /path/to/Hunyuan3D-2.1/webapp/studio-ui && pnpm install && pnpm build
 cp -r out/. /path/to/Hunyuan3D-2.1/webapp/webui/
 # 2) run (keys in Hunyuan3D-2.1/.env: OPENAI_API_KEY / GEMINI_API_KEY / HF_TOKEN)
 cd /path/to/Hunyuan3D-2.1 && docker compose up -d

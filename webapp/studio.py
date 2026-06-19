@@ -41,9 +41,11 @@ FORMATS = ("glb", "fbx", "blend")
 SCHEMA_VERSION = 1
 
 # 3/4-corner azimuths + down-tilt (kept consistent with server.HYFACE_CORNER_CAMS). Hunyuan azimuth
-# is left-handed (see pipeline.PROJECTION_CAMS): +X=left, -X=right, +Y=front, -Y=back, so the camera
-# that frames each corner is fl=315, fr=45, bl=225, br=135.
-CORNER_AZ = {"fl": 315.0, "bl": 225.0, "br": 135.0, "fr": 45.0}
+# is left-handed (see pipeline.PROJECTION_CAMS): left/right cardinals are 270/90. Front corners
+# fl=315, fr=45. Back corners bl=135, br=225 — empirically corrected: the back hemisphere reverses
+# the diagonal, so the prior geometric values (bl=225/br=135) framed the wrong corner and bl/br
+# rendered + baked swapped until this fix.
+CORNER_AZ = {"fl": 315.0, "bl": 135.0, "br": 225.0, "fr": 45.0}
 CORNER_ELEV = float(os.environ.get("HYFACE_CORNER_ELEV", "45"))
 
 _STORE_LOCK = threading.RLock()
@@ -66,6 +68,26 @@ def _vview(view: str) -> str:
     if view not in ALL_VIEWS:
         raise HTTPException(status_code=400, detail=f"Unknown view '{view}'")
     return view
+
+
+def _vview_any(view: str) -> str:
+    # Like _vview but also allows the free-camera "custom" pseudo-view (render/handpaint at an
+    # arbitrary elev/azim, not tied to one of the 10 canonical faces). "custom" is a safe literal,
+    # so the filename helpers (facerender_custom.png / handpaint_custom.png) stay inside the model dir.
+    if view == "custom" or view in ALL_VIEWS:
+        return view
+    raise HTTPException(status_code=400, detail=f"Unknown view '{view}'")
+
+
+def _vangles(elev, azim):
+    # Validate a custom camera. elev clamped to [-90, 90]; azim wrapped to [0, 360).
+    try:
+        e, a = float(elev), float(azim)
+    except (TypeError, ValueError):
+        raise HTTPException(status_code=400, detail="A custom view requires numeric elev and azim")
+    if not (-90.0 <= e <= 90.0):
+        raise HTTPException(status_code=400, detail="elev must be between -90 and 90")
+    return e, a % 360.0
 
 
 def _assert_within(path: Path, root: Path) -> Path:
@@ -337,9 +359,9 @@ def run_gpu_job(kind: str, sjid: str) -> None:
         elif kind == "studio_face_clear":
             _gpu_face_clear(sjid, mid, j["_view"], j["_clear_seq"])
         elif kind == "studio_face_render":
-            _gpu_face_render(sjid, mid, j["_view"])
+            _gpu_face_render(sjid, mid, j["_view"], j.get("_elev"), j.get("_azim"))
         elif kind == "studio_handpaint":
-            _gpu_handpaint(sjid, mid, j["_view"], j.get("_image"))
+            _gpu_handpaint(sjid, mid, j["_view"], j.get("_image"), j.get("_elev"), j.get("_azim"))
         complete_job(sjid, mid)
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -541,17 +563,21 @@ def _gpu_face_clear(sjid: str, mid: str, view: str, seq: int) -> None:
     _push_snapshot(mid, f"Clear {view}")
 
 
-def _gpu_face_render(sjid: str, mid: str, view: str) -> None:
+def _gpu_face_render(sjid: str, mid: str, view: str, elev=None, azim=None) -> None:
     """Render the CURRENT textured face at its camera into facerender_{view}.png — the backdrop the
-    hand-paint canvas draws on. Reused if already newer than the textured GLB (cheap repeat opens)."""
+    hand-paint canvas draws on. For a canonical view it's cached (reused while newer than the textured
+    GLB). For view="custom" the (elev, azim) vary per request, so it always re-renders."""
     from webapp import server
     glb = _textured_glb(mid)
     if not glb.exists():
         raise RuntimeError("model has no textured mesh")
     out = _facerender_file(mid, view)
-    if out.exists() and out.stat().st_mtime >= glb.stat().st_mtime:
-        return  # backdrop already current
-    elev, azim = _cam_for(VIEW_TO_TAG[view])
+    if view == "custom":
+        elev, azim = float(elev), float(azim)  # always re-render — the camera changes each request
+    else:
+        if out.exists() and out.stat().st_mtime >= glb.stat().st_mtime:
+            return  # backdrop already current
+        elev, azim = _cam_for(VIEW_TO_TAG[view])
     set_job(sjid, status="processing", progress=40)
     worker = server._ensure_model()
     img = worker.render_textured_view(str(glb), elev, azim)
@@ -559,14 +585,18 @@ def _gpu_face_render(sjid: str, mid: str, view: str) -> None:
     img.convert("RGB").save(out)
 
 
-def _gpu_handpaint(sjid: str, mid: str, view: str, overlay_path: str) -> None:
-    """Bake a hand-painted overlay (RGBA, alpha = strokes) onto the face at its camera."""
+def _gpu_handpaint(sjid: str, mid: str, view: str, overlay_path: str, elev=None, azim=None) -> None:
+    """Bake a hand-painted overlay (RGBA, alpha = strokes) onto the mesh at the face's camera. For
+    view="custom" the camera is the supplied (elev, azim) and no face slot is updated."""
     from webapp import server
     if not _textured_glb(mid).exists():
         raise RuntimeError("model has no textured mesh")
     if not (overlay_path and os.path.exists(overlay_path)):
         raise RuntimeError("no painted overlay provided")
-    elev, azim = _cam_for(VIEW_TO_TAG[view])
+    if view == "custom":
+        elev, azim = float(elev), float(azim)
+    else:
+        elev, azim = _cam_for(VIEW_TO_TAG[view])
     set_job(sjid, status="processing", progress=40)
     worker = server._ensure_model()
     overlay = Image.open(overlay_path).convert("RGBA")
@@ -574,10 +604,12 @@ def _gpu_handpaint(sjid: str, mid: str, view: str, overlay_path: str) -> None:
     worker.paint_overlay(uid=mid, textured_glb_path=str(_textured_glb(mid)), elev=elev, azim=azim,
                          overlay=overlay)
     data = _load(mid)
-    data["faces"][view] = {"status": "done", "mode": "paint"}
+    if view != "custom":
+        data["faces"][view] = {"status": "done", "mode": "paint"}
     data["textureStage"] = "complete"
     _save(mid, data)
-    _push_snapshot(mid, f"Hand paint {view}")
+    label = f"Hand paint custom ({int(round(elev))}°/{int(round(azim))}°)" if view == "custom" else f"Hand paint {view}"
+    _push_snapshot(mid, label)
     try:  # face changed -> drop the stale backdrop so the next open re-renders
         _facerender_file(mid, view).unlink()
     except FileNotFoundError:
@@ -925,21 +957,26 @@ def clear_face(mid: str, view: str):
 
 # --------------------------------------------------------------------------- routes: hand paint
 @router.post("/api/models/{mid}/faces/{view}/render")
-def render_face(mid: str, view: str):
+def render_face(mid: str, view: str, elev: float | None = None, azim: float | None = None):
     """Render the current textured face into a PNG backdrop for the hand-paint canvas. Poll the job;
-    on completion fetch GET faces/{view}/render-image."""
-    _vid(mid); _vview(view)
+    on completion fetch GET faces/{view}/render-image. For view="custom" pass elev+azim query params
+    to render an arbitrary camera."""
+    _vid(mid); _vview_any(view)
     if not _textured_glb(mid).exists():
         raise HTTPException(status_code=400, detail="Run base texturing first")
     sjid = new_job(f"Rendering {view}", mid)
-    set_job(sjid, _view=view)
+    if view == "custom":
+        e, a = _vangles(elev, azim)
+        set_job(sjid, _view=view, _elev=e, _azim=a)
+    else:
+        set_job(sjid, _view=view)
     submit_gpu("studio_face_render", sjid)
     return public_job(sjid)
 
 
 @router.get("/api/models/{mid}/faces/{view}/render-image")
 def face_render_image(mid: str, view: str):
-    _vid(mid); _vview(view)
+    _vid(mid); _vview_any(view)
     f = _facerender_file(mid, view)
     if not f.exists():
         raise HTTPException(status_code=404, detail="No render for this view")
@@ -947,18 +984,25 @@ def face_render_image(mid: str, view: str):
 
 
 @router.post("/api/models/{mid}/faces/{view}/handpaint")
-async def handpaint_face(mid: str, view: str, overlay: UploadFile = File(...)):
-    """Bake a hand-painted overlay (transparent except the brushed strokes) onto this face.  → Job"""
-    _vid(mid); _vview(view)
+async def handpaint_face(mid: str, view: str, overlay: UploadFile = File(...),
+                         elev: float | None = Form(None), azim: float | None = Form(None)):
+    """Bake a hand-painted overlay (transparent except the brushed strokes) onto this face.  → Job
+    For view="custom" pass elev+azim form fields to bake at an arbitrary camera (no face slot is
+    touched; a history snapshot is still pushed)."""
+    _vid(mid); _vview_any(view)
     if not _textured_glb(mid).exists():
         raise HTTPException(status_code=400, detail="Run base texturing first")
     overlay_path = str(_model_dir(mid) / f"handpaint_{view}.png")
     _save_upload_png(await overlay.read(), Path(overlay_path))
     sjid = new_job(f"Hand painting {view}", mid)
-    set_job(sjid, _view=view, _image=overlay_path)
-    data = _load(mid)
-    data["faces"][view]["status"] = "texturing"
-    _save(mid, data)
+    if view == "custom":
+        e, a = _vangles(elev, azim)
+        set_job(sjid, _view=view, _image=overlay_path, _elev=e, _azim=a)
+    else:
+        set_job(sjid, _view=view, _image=overlay_path)
+        data = _load(mid)
+        data["faces"][view]["status"] = "texturing"
+        _save(mid, data)
     submit_gpu("studio_handpaint", sjid)
     return public_job(sjid)
 

@@ -278,6 +278,39 @@ def test_handpaint_and_render_endpoints():
         studio.submit_gpu = orig
 
 
+def test_custom_view_render_and_handpaint():
+    c = _client()
+    mid = _create(c, "Custom")
+    png = _png()
+    (studio.OUTPUT_DIR / f"{mid}_textured.glb").write_bytes(b"glb")
+    calls = []
+    orig = studio.submit_gpu
+    studio.submit_gpu = lambda kind, sjid: calls.append((kind, sjid, dict(studio.STUDIO_JOBS[sjid])))
+    try:
+        # custom render needs elev+azim
+        assert c.post(f"/api/models/{mid}/faces/custom/render").status_code == 400
+        assert c.post(f"/api/models/{mid}/faces/custom/render?elev=20&azim=200").status_code == 200
+        kind, _, job = calls[-1]
+        assert kind == "studio_face_render"
+        assert job["_view"] == "custom" and job["_elev"] == 20.0 and job["_azim"] == 200.0
+        # azim wraps, elev out of range rejected
+        assert c.post(f"/api/models/{mid}/faces/custom/render?elev=20&azim=400").status_code == 200
+        assert calls[-1][2]["_azim"] == 40.0
+        assert c.post(f"/api/models/{mid}/faces/custom/render?elev=120&azim=0").status_code == 400
+        # custom handpaint needs elev+azim form fields, dispatches, and touches NO face slot
+        assert c.post(f"/api/models/{mid}/faces/custom/handpaint",
+                      files={"overlay": ("o.png", png, "image/png")}).status_code == 400
+        r = c.post(f"/api/models/{mid}/faces/custom/handpaint",
+                   files={"overlay": ("o.png", png, "image/png")}, data={"elev": "20", "azim": "200"})
+        assert r.status_code == 200
+        kind, _, job = calls[-1]
+        assert kind == "studio_handpaint" and job["_view"] == "custom"
+        assert job["_elev"] == 20.0 and job["_azim"] == 200.0
+        assert "custom" not in c.get(f"/api/models/{mid}").json()["faces"]
+    finally:
+        studio.submit_gpu = orig
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -326,10 +326,12 @@ HYFACE_FACES = ["front", "back", "left", "right", "top", "bottom"]
 # tuned independently (NOT derived from PROJECTION_CAMS, whose cardinal left/right are 270/90); each
 # corner tilts down (+elev) to reach recessed tops. The adjacent faces' references seed the gpt-synth
 # corner reference (geometry render is the layout lock).
+# Back corners bl/br empirically corrected (135/225, swapped from the old 225/135) so they frame the
+# object's OWN back-left / back-right — matching studio.CORNER_AZ. Front corners unchanged.
 HYFACE_CORNER_CAMS = {
     "fl": (315.0, ["front", "left"]),
-    "bl": (225.0, ["back", "left"]),
-    "br": (135.0, ["back", "right"]),
+    "bl": (135.0, ["back", "left"]),
+    "br": (225.0, ["back", "right"]),
     "fr": (45.0, ["front", "right"]),
 }
 # Equatorial cardinals that also get tilted (elev +/-) views. Poles (top/bottom) excluded.

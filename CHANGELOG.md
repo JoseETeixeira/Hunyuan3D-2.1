@@ -2,7 +2,35 @@
 
 ## Unreleased
 
+### Changed
+- **Studio UI source moved into the repo at `webapp/studio-ui/`** (was an external
+  `Downloads/3-d-model-generation-workflow` checkout). Build flow unchanged: `cd webapp/studio-ui &&
+  pnpm install && pnpm build`, then copy `out/*` → `webapp/webui/`. `node_modules`/`.next`/`out` are
+  git-ignored by the project's own `.gitignore`.
+
 ### Fixed
+- **3D viewer spun on its own.** The `<model-viewer>` had the `auto-rotate` attribute, so the model
+  rotated without any input. Removed it — the viewer now only moves via mouse (`camera-controls`).
+  `webapp/studio-ui/components/studio/model-3d-viewer.tsx`.
+- **Studio showed only the in-memory demo, never the real models in `outputs/models`.** The Next.js UI
+  defaults to its mock backend (`USE_MOCK = NEXT_PUBLIC_USE_MOCK !== "false"`) and the production build
+  shipped with the env unset, so it ran the mock ("Demo robot") instead of calling the real `/api/*`.
+  Added `.env.production` with `NEXT_PUBLIC_USE_MOCK=false`; the build now constant-folds `USE_MOCK` to
+  `false` and talks to the FastAPI studio backend (rebuild → `webapp/webui/`). Restart the server to pick
+  up the rebuilt UI.
+- **First hand-paint open showed a broken/blank backdrop.** `useJobRunner.run` resolved as soon as the
+  job was *created* (it kicked off polling but didn't await it), so the hand-paint setup set the backdrop
+  URL before the render finished → 404, no loader. `run` now resolves on the job's terminal state, so the
+  "Rendering the current face…" loader shows until the image is ready, and the render-then-paint and
+  sequential reface/reference loops are correctly ordered.
+- **Back-left / back-right corners rendered + baked swapped.** The 3/4 back-corner azimuths were
+  `bl=225, br=135` in both `studio.CORNER_AZ` (handpaint / face render / clear, via `_cam_for`) and
+  `server.HYFACE_CORNER_CAMS` (reface, via `_run_reface`, and base corner fills). In practice those
+  framed the opposite corner, so selecting `bl` rendered/baked the back-RIGHT and `br` the back-LEFT
+  (front corners `fl=315`/`fr=45` and the left/right cardinals were already correct). Swapped to
+  `bl=135, br=225` in both tables (kept consistent). MV-Adapter's separate corner convention
+  (`mvadapter_runner.py`, `mvadapter_texture.py`) is unchanged. Re-run any back-corner reface/paint to
+  apply.
 - **New studio GPU kinds were dropped by the worker loop.** `server._worker_loop` routed only a
   hardcoded tuple (`studio_base/mesh/reface/face_edit`) to `studio.run_gpu_job`, so `studio_face_clear`,
   `studio_face_render` and `studio_handpaint` were dequeued and silently dropped (job stuck at 5%). Now
@@ -22,6 +50,16 @@
   worker, queue, health, and submit path share one module instance.
 
 ### Added
+- **Custom (free-camera) hand-paint — "Paint this angle".** A button on the 3D viewer captures the
+  live `model-viewer` orbit (`elev = 90 − phi`, `azim = theta mod 360` — matches the built-in cameras
+  PROJECTION_CAMS front=0/right=90/back=180/left=270; an earlier `360 − theta` mirrored the render) and opens the hand-paint
+  canvas on a render at that exact camera. Paint or upload, then bake — the render and bake share the
+  camera, so strokes always land where painted. It's a free touch-up (not tied to one of the 10 faces):
+  no face slot changes, and it pushes its own `Hand paint custom (e°/a°)` history snapshot. Backend:
+  `faces/custom/render?elev&azim`, `faces/custom/render-image`, `faces/custom/handpaint` (multipart
+  overlay + elev/azim) reusing `render_textured_view` / `paint_overlay`; `_vview_any` + `_vangles`
+  validate the pseudo-view and clamp elev∈[-90,90], azim mod 360. Frontend: `model-3d-viewer.tsx`,
+  `lib/api.ts`. The viewer now cache-busts the textured GLB on `updatedAt` so a bake is visible.
 - **Hand-paint touch-ups on a face.** A "Hand paint" method on each face renders the face AS IT
   CURRENTLY LOOKS on the mesh (`POST faces/{view}/render` → `studio_face_render` →
   `facerender_{view}.png`, reused while fresh) and lets you brush strokes on it with a palette sampled
@@ -30,6 +68,15 @@
   `TextureWorker.paint_overlay` (direct `back_project`, no rembg/silhouette-fit — the strokes are
   pixel-locked to the camera). Pushes a "Hand paint {view}" history snapshot.
   `components/studio/hand-paint-canvas.tsx`.
+- **Hand-paint download / upload + zoom.** The hand-paint surface gains: **Download** (saves the
+  current face render as `handpaint-{view}.png` for editing elsewhere), **Upload** (picks an image,
+  contain-fits it into the square overlay buffer and bakes it straight onto the face via the existing
+  `POST faces/{view}/handpaint` — a downloaded backdrop round-trips 1:1), and **zoom/pan** (mouse-wheel
+  zoom centered on the cursor, drag-pan via a Pan toggle or the middle mouse button, Reset-to-fit). The
+  drawing buffer stays `dim×dim` and the exported overlay is always the full buffer, so zoom never
+  reduces bake resolution; brush mapping stays pixel-accurate under transform. Frontend-only — no
+  backend, API, or `static/` change. `components/studio/hand-paint-canvas.tsx` (+ `texture-panel.tsx`
+  passes `downloadName`); rebuilt into `webapp/webui/`.
 - **Remesh button (textured state).** A collapsible "Remesh" control in the texture panel regenerates
   the 3D shape from a chosen reference view (reuses `POST /mesh`); it warns that this resets the texture
   and history.

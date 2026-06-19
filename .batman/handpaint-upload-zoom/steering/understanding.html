@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Understanding — Hand-paint upload/download + zoom</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--ink:#e6edf3;--mut:#8b949e;--acc:#58a6ff;--ok:#3fb950;--warn:#d29922;--pink:#db61a2}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:14px/1.55 ui-sans-serif,system-ui,Segoe UI,Roboto,sans-serif;padding:28px}
+  h1{font-size:22px;margin:0 0 4px}h2{font-size:15px;margin:0 0 10px;color:var(--acc);letter-spacing:.3px}
+  .sub{color:var(--mut);margin:0 0 22px}
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(2,1fr)}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px}
+  .full{grid-column:1/-1}
+  code{background:#0a0e14;border:1px solid var(--line);border-radius:5px;padding:1px 5px;color:#9cdcfe;font-size:12.5px}
+  .flow{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:6px 0}
+  .node{background:#0a0e14;border:1px solid var(--line);border-radius:8px;padding:8px 11px;font-size:12.5px}
+  .node b{color:var(--ink)} .arrow{color:var(--acc);font-weight:700}
+  .tag{display:inline-block;font-size:11px;border-radius:999px;padding:2px 9px;margin-right:6px}
+  .t-fe{background:rgba(88,166,255,.15);color:var(--acc);border:1px solid rgba(88,166,255,.4)}
+  .t-be{background:rgba(219,97,162,.15);color:var(--pink);border:1px solid rgba(219,97,162,.4)}
+  .t-new{background:rgba(63,185,80,.15);color:var(--ok);border:1px solid rgba(63,185,80,.4)}
+  ul{margin:6px 0 0;padding-left:18px}li{margin:3px 0}
+  .ok{color:var(--ok)}.warn{color:var(--warn)}.mut{color:var(--mut)}
+  .pill{font-size:11px;border:1px solid var(--line);border-radius:6px;padding:2px 7px;color:var(--mut)}
+</style>
+</head>
+<body>
+  <h1>Hand-paint: download / upload a view image + zoom</h1>
+  <p class="sub">Phase 1 understanding · task <code>handpaint-upload-zoom</code> · per-model studio (Next.js)</p>
+
+  <div class="grid">
+    <div class="card full">
+      <h2>WHERE THE UI LIVES (the surprise)</h2>
+      <div class="flow">
+        <span class="node">Source <b>Downloads/3-d-model-generation-workflow</b><br><span class="mut">React / Next.js (output:export)</span></span>
+        <span class="arrow">— pnpm build →</span>
+        <span class="node"><b>out/</b> static export</span>
+        <span class="arrow">— copy →</span>
+        <span class="node"><b>webapp/webui/</b><br><span class="mut">served by FastAPI</span></span>
+      </div>
+      <p class="mut" style="margin:8px 0 0">Same build id <code>8q2OrD2fQkaZlxgKmscuh</code> in both → <span class="warn">edits need a rebuild + copy.</span> The bundled <code>static/</code> SPA is the OLD UI and has no hand-paint surface.</p>
+    </div>
+
+    <div class="card">
+      <h2>HAND-PAINT FLOW TODAY</h2>
+      <div class="flow"><span class="node">Open face → <b>Hand paint</b></span></div>
+      <div class="flow"><span class="arrow">1 ▸</span><span class="node"><span class="tag t-be">BE</span><code>POST faces/:view/render</code> → poll job</span></div>
+      <div class="flow"><span class="arrow">2 ▸</span><span class="node"><span class="tag t-be">BE</span><code>GET …/render-image</code> = square backdrop (current face)</span></div>
+      <div class="flow"><span class="arrow">3 ▸</span><span class="node"><span class="tag t-fe">FE</span>paint strokes on transparent canvas (palette from reference)</span></div>
+      <div class="flow"><span class="arrow">4 ▸</span><span class="node"><span class="tag t-fe">FE</span><code>canvas.toBlob()</code> → RGBA overlay</span></div>
+      <div class="flow"><span class="arrow">5 ▸</span><span class="node"><span class="tag t-be">BE</span><code>POST …/handpaint</code> → <code>paint_overlay</code> bake</span></div>
+    </div>
+
+    <div class="card">
+      <h2>BAKE SEMANTICS · <code>pipeline.paint_overlay</code></h2>
+      <ul>
+        <li>overlay resized to render size; <code>alpha&gt;0.5</code> = strokes</li>
+        <li><code>back_project</code> composites only <b>painted, camera-facing, visible</b> texels</li>
+        <li>off-mesh / background pixels project to nothing → harmless</li>
+        <li class="ok">⇒ a fully-opaque uploaded image bakes the whole visible face — no backend change needed</li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>CHANGE SURFACE</h2>
+      <ul>
+        <li><span class="tag t-fe">FE</span><code>hand-paint-canvas.tsx</code> <span class="tag t-new">PRIMARY</span> upload + download + zoom/pan</li>
+        <li><span class="tag t-fe">FE</span><code>texture-panel.tsx</code> <span class="mut">(minor — thread id/view or download url)</span></li>
+        <li><span class="tag t-fe">FE</span><code>lib/api.ts</code> <span class="mut">(maybe a helper; reuses faceRenderUrl + handpaintFace)</span></li>
+        <li><span class="tag t-be">BE</span><span class="ok">no change</span> · <span class="mut">build: out/ → webapp/webui/</span></li>
+      </ul>
+    </div>
+
+    <div class="card">
+      <h2>TWO FEATURES</h2>
+      <ul>
+        <li><b>Download/upload</b>: download backdrop (round-trips 1:1) → edit externally → upload → draw into canvas buffer aligned to backdrop → Apply uses existing overlay bake.</li>
+        <li><b>Zoom</b>: scale backdrop+canvas viewport, keep <code>ptr()</code> mapping correct (rect-based math already survives CSS scale), add pan. Buffer stays <code>dim×dim</code> so bake resolution is unchanged.</li>
+      </ul>
+    </div>
+
+    <div class="card full">
+      <h2>OPEN DECISIONS (for grilling)</h2>
+      <ul>
+        <li>Download = backdrop only? <span class="mut">(vs +strokes composite / reference)</span></li>
+        <li>Upload = draw into canvas (reuse bake, no BE change)? <span class="ok">recommended</span></li>
+        <li>Upload fit policy for non-square images: contain vs cover</li>
+        <li>Zoom UX: slider + drag-pan (+ ctrl-wheel?); max zoom</li>
+        <li>Confirm: I edit Next.js source &amp; rebuild → copy to <code>webui/</code> <span class="mut">(node v22 + pnpm 10.15 present)</span></li>
+      </ul>
+      <p style="margin:10px 0 0"><span class="pill">architecture risk: NONE</span> <span class="pill">pure client-side</span> <span class="pill">no new endpoints</span></p>
+    </div>
+  </div>
+</body>
+</html>

@@ -1,0 +1,193 @@
+"use client"
+
+import { Box, Crosshair, Download } from "lucide-react"
+import { useRef, useState } from "react"
+import { api } from "@/lib/api"
+import type { Model } from "@/lib/types"
+import type { ModelViewerElement } from "@/types/model-viewer"
+import { buttonVariants } from "@/components/ui/button"
+import { HandPaintCanvas } from "./hand-paint-canvas"
+import { ImageDialog } from "./image-dialog"
+import { useStudio } from "./studio-provider"
+
+const FORMATS = ["glb", "fbx", "blend"] as const
+
+export function Model3DViewer({ model }: { model: Model | null }) {
+  const { runJob } = useStudio()
+  const [tab, setTab] = useState<"shape" | "tex">("tex")
+  const [fmt, setFmt] = useState<string>("glb")
+  const mvRef = useRef<HTMLElement | null>(null)
+
+  // Custom (free-camera) hand-paint state.
+  const [customOpen, setCustomOpen] = useState(false)
+  const [angle, setAngle] = useState<{ elev: number; azim: number } | null>(null)
+  const [backdrop, setBackdrop] = useState<string | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const shapeUrl = model?.meshUrl ?? null
+  const texUrl = model?.texturedUrl ?? null
+  const showTex = tab === "tex" && texUrl
+  const baseSrc = showTex ? texUrl : shapeUrl
+  // Cache-bust on updatedAt so a bake (which bumps updatedAt) reloads the GLB in the viewer.
+  const src = baseSrc ? `${baseSrc}${baseSrc.includes("?") ? "&" : "?"}v=${model?.updatedAt ?? 0}` : null
+
+  // Capture the live orbit of the 3D viewer and open a hand-paint canvas for that exact camera.
+  // model-viewer orbit is in radians: theta = azimuth (0 = front/+Z), phi = polar from +Y (PI/2 = equator).
+  async function paintThisAngle() {
+    if (!model || !texUrl) return
+    const mv = mvRef.current as ModelViewerElement | null
+    if (!mv?.getCameraOrbit) return
+    const orbit = mv.getCameraOrbit()
+    const thetaDeg = (orbit.theta * 180) / Math.PI
+    const phiDeg = (orbit.phi * 180) / Math.PI
+    const elev = Math.max(-90, Math.min(90, 90 - phiDeg))
+    // model-viewer theta maps 1:1 to the render azimuth: it matches every built-in camera
+    // (PROJECTION_CAMS front=0, right=90, back=180, left=270; corners fl=315/fr=45). Using
+    // (360 - theta) would reflect right<->left (mirrored render), so use theta directly.
+    const azim = ((thetaDeg % 360) + 360) % 360
+    const a = { elev, azim }
+    setAngle(a)
+    setBackdrop(null)
+    setCustomOpen(true)
+    setBusy(true)
+    try {
+      await runJob(() => api.renderCustomView(model.id, a.elev, a.azim), "Rendering custom view")
+      setBackdrop(api.customRenderUrl(model.id, Date.now()))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Bake the painted/uploaded overlay at the captured camera (same camera as the render → aligned).
+  async function applyCustom(overlay: Blob) {
+    if (!model || !angle) return
+    setBusy(true)
+    try {
+      await runJob(() => api.handpaintCustomView(model.id, angle.elev, angle.azim, overlay), "Hand painting custom view")
+      setCustomOpen(false)
+      setBackdrop(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="flex h-full flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+          <button
+            type="button"
+            onClick={() => setTab("shape")}
+            disabled={!shapeUrl}
+            className={`rounded-md px-3 py-1 text-xs font-medium transition-colors disabled:opacity-40 ${
+              tab === "shape" && shapeUrl ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Shape
+          </button>
+          <button
+            type="button"
+            onClick={() => setTab("tex")}
+            disabled={!texUrl}
+            className={`rounded-md px-3 py-1 text-xs font-medium transition-colors disabled:opacity-40 ${
+              tab === "tex" && texUrl ? "bg-secondary text-foreground" : "text-muted-foreground hover:text-foreground"
+            }`}
+          >
+            Textured
+          </button>
+        </div>
+        {model && (shapeUrl || texUrl) ? (
+          <div className="flex items-center gap-1.5">
+            {texUrl ? (
+              <button
+                type="button"
+                onClick={paintThisAngle}
+                disabled={busy}
+                title="Hand-paint the model from the angle you're currently viewing"
+                className={buttonVariants({ variant: "secondary", size: "sm" })}
+              >
+                <Crosshair className="size-3.5" />
+                Paint this angle
+              </button>
+            ) : null}
+            <select
+              value={fmt}
+              onChange={(e) => setFmt(e.target.value)}
+              className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring"
+            >
+              {FORMATS.map((f) => (
+                <option key={f} value={f}>
+                  {f.toUpperCase()}
+                </option>
+              ))}
+            </select>
+            <a
+              href={api.downloadUrl(model.id, fmt)}
+              download
+              className={buttonVariants({ variant: "secondary", size: "sm" })}
+            >
+              <Download className="size-3.5" />
+              Export
+            </a>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="relative flex-1 overflow-hidden rounded-xl border border-border bg-[radial-gradient(circle_at_50%_30%,oklch(0.24_0.03_240),oklch(0.15_0.02_250))]">
+        {src ? (
+          <model-viewer
+            ref={mvRef}
+            src={src}
+            alt={`3D model: ${model?.name ?? ""}`}
+            camera-controls
+            shadow-intensity="1"
+            exposure="1.1"
+            environment-image="neutral"
+            style={{ width: "100%", height: "100%", backgroundColor: "transparent" }}
+          />
+        ) : (
+          <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
+            <Box className="size-10 opacity-40" />
+            <div>
+              <p className="text-sm font-medium text-foreground">No mesh yet</p>
+              <p className="text-xs">Approve references, then generate the textured model.</p>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <ImageDialog
+        open={customOpen}
+        onOpenChange={(o) => {
+          setCustomOpen(o)
+          if (!o) setBackdrop(null)
+        }}
+        title="Custom view"
+        description={
+          angle
+            ? `Free camera at elev ${Math.round(angle.elev)}° / azim ${Math.round(angle.azim)}°. Paint or upload, then Apply to bake it onto the mesh.`
+            : "Rotate the model, then paint this angle."
+        }
+        imageUrl={null}
+        imageAlt="custom view"
+        imageSlot={
+          <HandPaintCanvas
+            backdropUrl={backdrop}
+            refUrl={backdrop}
+            onApply={applyCustom}
+            busy={busy}
+            downloadName="handpaint-custom"
+          />
+        }
+        badge={
+          busy ? <span className="rounded-md bg-secondary px-2 py-0.5 text-[11px] font-medium">Working…</span> : null
+        }
+      >
+        <p className="rounded-md bg-secondary px-2.5 py-2 text-[11px] text-muted-foreground">
+          This bakes at the exact camera you captured, so strokes land where you paint. It is a free-camera touch-up —
+          it isn&apos;t tied to one of the ten faces and pushes its own texture-history snapshot.
+        </p>
+      </ImageDialog>
+    </div>
+  )
+}
