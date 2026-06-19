@@ -50,6 +50,11 @@
   worker, queue, health, and submit path share one module instance.
 
 ### Added
+- **Poly-count indicator on the 3D viewer.** A small badge shows the current mesh's `N faces · M verts`,
+  computed on the backend from the GLB with trimesh (textured GLB preferred, else the shape), cached per
+  file version so `assemble_model` never reloads the mesh on a poll. Exposed as `model.meshStats`
+  (`{ faces, vertices }`, null when there's no/unreadable mesh). `webapp/studio.py` (`_mesh_stats`),
+  `webapp/studio-ui/components/studio/model-3d-viewer.tsx`, `lib/types.ts`.
 - **Custom (free-camera) hand-paint — "Paint this angle".** A button on the 3D viewer captures the
   live `model-viewer` orbit (`elev = 90 − phi`, `azim = theta mod 360` — matches the built-in cameras
   PROJECTION_CAMS front=0/right=90/back=180/left=270; an earlier `360 − theta` mirrored the render) and opens the hand-paint

@@ -154,6 +154,11 @@ export function Model3DViewer({ model }: { model: Model | null }) {
             </div>
           </div>
         )}
+        {model?.meshStats ? (
+          <div className="pointer-events-none absolute bottom-2 left-2 rounded-md border border-border bg-background/80 px-2 py-1 font-mono text-[11px] text-muted-foreground backdrop-blur">
+            {model.meshStats.faces.toLocaleString()} faces · {model.meshStats.vertices.toLocaleString()} verts
+          </div>
+        ) : null}
       </div>
 
       <ImageDialog

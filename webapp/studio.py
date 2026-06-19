@@ -235,6 +235,37 @@ def _ref_url(mid, view, ver):
     return f"/api/models/{mid}/references/{view}/image?v={ver}" if _ref_file(mid, view).exists() else None
 
 
+# Faces/vertices per GLB version — computed once with trimesh, reused while the file is unchanged so
+# assemble_model (called on every poll) never reloads the mesh.
+_MESH_STATS_CACHE: dict = {}
+
+
+def _mesh_stats(mid: str):
+    """Face + vertex count of the current GLB (textured preferred, else the untextured shape). Cached
+    by (path, mtime, size). Returns None when there's no mesh or it can't be read."""
+    glb = _textured_glb(mid)
+    if not glb.exists():
+        glb = _shape_glb(mid)
+    if not glb.exists():
+        return None
+    try:
+        st = glb.stat()
+        sig = (str(glb), st.st_mtime_ns, st.st_size)
+    except OSError:
+        return None
+    cached = _MESH_STATS_CACHE.get(mid)
+    if cached and cached[0] == sig:
+        return cached[1]
+    try:
+        import trimesh
+        mesh = trimesh.load(str(glb), force="mesh")
+        stats = {"faces": int(len(mesh.faces)), "vertices": int(len(mesh.vertices))}
+    except Exception:  # noqa: BLE001 — a missing/invalid mesh just yields no count
+        return None
+    _MESH_STATS_CACHE[mid] = (sig, stats)
+    return stats
+
+
 def assemble_model(mid: str) -> dict:
     data = _load(mid)
     ver = data["updatedAt"]
@@ -253,6 +284,7 @@ def assemble_model(mid: str) -> dict:
         "faces": faces,
         "meshUrl": (f"/api/files/{mid}_shape.glb?v={ver}" if _shape_glb(mid).exists() else None),
         "texturedUrl": (f"/api/files/{mid}_textured.glb?v={ver}" if _textured_glb(mid).exists() else None),
+        "meshStats": _mesh_stats(mid),
         "textureStage": data["textureStage"],
         "meshSourceView": data.get("meshSourceView"),
         "textureHistory": [{"seq": e["seq"], "label": e["label"], "ts": e["ts"], "stage": e["stage"]}
