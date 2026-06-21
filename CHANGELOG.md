@@ -3,6 +3,12 @@
 ## Unreleased
 
 ### Added
+- **An already-textured `.blend` imports as a textured model — paint it without re-texturing.** On
+  `.blend` import the backend now detects an embedded base-color texture (`_glb_has_texture`); if
+  present, the converted GLB is registered as the textured model (copied to `{id}_textured.glb`, stage
+  `complete`, faces `done`) so the Textured tab, "Paint this angle", reface, and textured export work
+  immediately — no "Generate textures"/regenerate step. Untextured `.blend`s still import as a fresh
+  base. `webapp/studio.py` (`_gpu_mesh_upload`).
 - **Uploaded `.blend` goes straight to texturing.** After a `.blend` import, the workflow now jumps to
   the Mesh & textures step and the uploaded mesh is texturable directly — "Generate textures" reuses
   the uploaded shape (no need to "Generate mesh" first; `_gpu_base` already reuses an existing shape

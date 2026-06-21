@@ -156,6 +156,23 @@ def _rig_input_mesh(mid: str) -> Path:
     return t if t.exists() else _shape_glb(mid)
 
 
+def _glb_has_texture(path: Path) -> bool:
+    """True if the GLB carries a base-color image texture (so an uploaded .blend that's already
+    textured can be adopted as a textured model — no re-texture needed before hand paint)."""
+    try:
+        import trimesh
+        loaded = trimesh.load(str(path))
+    except Exception:  # noqa: BLE001
+        return False
+    geoms = list(loaded.geometry.values()) if isinstance(loaded, trimesh.Scene) else [loaded]
+    for g in geoms:
+        mat = getattr(getattr(g, "visual", None), "material", None)
+        if mat is not None and (getattr(mat, "baseColorTexture", None) is not None
+                                or getattr(mat, "image", None) is not None):
+            return True
+    return False
+
+
 def _invalidate_rig(mid: str, data: dict) -> None:
     """A new mesh invalidates any rig — the skeleton/skin belong to the old geometry. Delete the rig
     artifacts and reset the rig row (the prior rig is preserved in the mesh snapshot for restore)."""
@@ -699,8 +716,10 @@ def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
 
 
 def _gpu_mesh_upload(sjid: str, mid: str) -> None:
-    """Adopt an uploaded .blend as the model's new (untextured) shape: convert it to the shape GLB,
-    then reset texture state like a regenerated mesh. References + seed are kept."""
+    """Adopt an uploaded .blend as the model's new shape: convert it to the shape GLB, then reset
+    texture state. If the .blend already carries a baked texture, register it as a TEXTURED model
+    (stage complete) so hand paint / reface / export work directly — no re-texture needed. References
+    + seed are kept; meshSourceView is left untouched so the regenerate control stays valid."""
     from webapp import server
     blend = _upload_blend_file(mid)
     if not blend.exists():
@@ -712,15 +731,23 @@ def _gpu_mesh_upload(sjid: str, mid: str) -> None:
         blend.unlink()
     except FileNotFoundError:
         pass
-    # a new mesh invalidates any existing texture (same reset as _gpu_mesh). meshSourceView is left
-    # untouched so it stays a valid ViewId for the regenerate control.
+    # If the import is already textured, keep it as the textured GLB so it's paintable; else drop any
+    # old texture and treat it as a fresh untextured base.
+    has_texture = _glb_has_texture(_shape_glb(mid))
+    print(f"[studio] .blend import {mid}: has_texture={has_texture}")
     try:
         _textured_glb(mid).unlink()
     except FileNotFoundError:
         pass
+    if has_texture:
+        shutil.copy2(_shape_glb(mid), _textured_glb(mid))
     data = _load(mid)
-    data["faces"] = {v: {"status": "pending", "mode": None} for v in ALL_VIEWS}
-    data["textureStage"] = "none"
+    if has_texture:
+        data["faces"] = {v: {"status": "done", "mode": None} for v in ALL_VIEWS}
+        data["textureStage"] = "complete"
+    else:
+        data["faces"] = {v: {"status": "pending", "mode": None} for v in ALL_VIEWS}
+        data["textureStage"] = "none"
     _invalidate_rig(mid, data)
     _save(mid, data)
     _clear_history(mid)
