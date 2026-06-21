@@ -3,7 +3,7 @@
 import { Box, Crosshair, Download, Upload } from "lucide-react"
 import { useRef, useState } from "react"
 import { api } from "@/lib/api"
-import type { Model } from "@/lib/types"
+import { MARKER_LABELS, type MarkerId, type Model } from "@/lib/types"
 import type { ModelViewerElement } from "@/types/model-viewer"
 import { buttonVariants } from "@/components/ui/button"
 import { HandPaintCanvas } from "./hand-paint-canvas"
@@ -13,7 +13,7 @@ import { useStudio } from "./studio-provider"
 const FORMATS = ["glb", "fbx", "blend"] as const
 
 export function Model3DViewer({ model }: { model: Model | null }) {
-  const { runJob } = useStudio()
+  const { runJob, updateModel, rigActive, rigJoint, setRigJoint } = useStudio()
   const [tab, setTab] = useState<"shape" | "tex">("tex")
   const [fmt, setFmt] = useState<string>("glb")
   const mvRef = useRef<HTMLElement | null>(null)
@@ -27,10 +27,15 @@ export function Model3DViewer({ model }: { model: Model | null }) {
 
   const shapeUrl = model?.meshUrl ?? null
   const texUrl = model?.texturedUrl ?? null
+  const riggedUrl = model?.rig?.riggedUrl ?? null
   const showTex = tab === "tex" && texUrl
-  const baseSrc = showTex ? texUrl : shapeUrl
+  // While the Rigging step is open, show the rigged GLB so marker coords + click raycasts share one
+  // coordinate space.
+  const baseSrc = rigActive && riggedUrl ? riggedUrl : showTex ? texUrl : shapeUrl
   // Cache-bust on updatedAt so a bake (which bumps updatedAt) reloads the GLB in the viewer.
   const src = baseSrc ? `${baseSrc}${baseSrc.includes("?") ? "&" : "?"}v=${model?.updatedAt ?? 0}` : null
+  const markers = model?.rig?.markers ?? {}
+  const showMarkers = rigActive && !!riggedUrl
 
   // Capture the live orbit of the 3D viewer and open a hand-paint canvas for that exact camera.
   // model-viewer orbit is in radians: theta = azimuth (0 = front/+Z), phi = polar from +Y (PI/2 = equator).
@@ -65,6 +70,27 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     setBusy(true)
     try {
       await runJob(() => api.uploadMesh(model.id, file), "Importing .blend")
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Rig marker placement: click the model with a joint selected → raycast to the surface, send the
+  // hit point + normal so the backend places the marker at the limb center.
+  async function placeMarker(e: React.MouseEvent) {
+    if (!rigActive || !rigJoint || !model) return
+    const mv = mvRef.current as ModelViewerElement | null
+    if (!mv?.positionAndNormalFromPoint) return
+    const r = mv.getBoundingClientRect()
+    const hit = mv.positionAndNormalFromPoint(e.clientX - r.left, e.clientY - r.top)
+    if (!hit) return
+    const point: [number, number, number] = [hit.position.x, hit.position.y, hit.position.z]
+    const normal: [number, number, number] = [hit.normal.x, hit.normal.y, hit.normal.z]
+    setBusy(true)
+    try {
+      const joint = rigJoint
+      const m = await api.setRigMarker(model.id, joint, point, normal)
+      updateModel(m)
     } finally {
       setBusy(false)
     }
@@ -180,8 +206,40 @@ export function Model3DViewer({ model }: { model: Model | null }) {
             shadow-intensity="1"
             exposure="1.1"
             environment-image="neutral"
-            style={{ width: "100%", height: "100%", backgroundColor: "transparent" }}
-          />
+            onClick={showMarkers && rigJoint ? placeMarker : undefined}
+            style={{
+              width: "100%",
+              height: "100%",
+              backgroundColor: "transparent",
+              cursor: showMarkers && rigJoint ? "crosshair" : undefined,
+            }}
+          >
+            {showMarkers
+              ? Object.entries(markers).map(([key, pos]) =>
+                  pos ? (
+                    <button
+                      key={key}
+                      type="button"
+                      slot={`hotspot-${key}`}
+                      data-position={`${pos[0]}m ${pos[1]}m ${pos[2]}m`}
+                      data-normal="0m 1m 0m"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        setRigJoint(key as MarkerId)
+                      }}
+                      title={MARKER_LABELS[key as MarkerId]}
+                      className={`flex size-3.5 items-center justify-center rounded-full border-2 text-[0px] shadow ${
+                        rigJoint === key
+                          ? "border-white bg-primary ring-2 ring-primary"
+                          : "border-white bg-primary/70 hover:bg-primary"
+                      }`}
+                    >
+                      {MARKER_LABELS[key as MarkerId]}
+                    </button>
+                  ) : null,
+                )
+              : null}
+          </model-viewer>
         ) : (
           <div className="flex h-full flex-col items-center justify-center gap-3 text-center text-muted-foreground">
             <Box className="size-10 opacity-40" />

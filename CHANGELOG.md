@@ -3,6 +3,38 @@
 ## Unreleased
 
 ### Added
+- **Step 3 — AI rigging (UniRig) with positionable joint markers.** A third workflow step rigs the
+  model mesh with [UniRig](https://github.com/VAST-AI-Research/UniRig) (skeleton → skin → merge), run
+  as a subprocess in its own env on the GPU worker lane (like Blender). It surfaces 12 named joints
+  (groin, chin, L/R shoulder, elbow, hand, knee, ankle) as markers in the 3D viewer; select a joint
+  and click the model to place it at the limb's **center** (a trimesh ray through the mesh →
+  entry/exit midpoint). "Apply rig changes" edits the skeleton to the new joints and re-runs UniRig
+  skin + merge. The rigged GLB carries armature + skin, and Export now serves it as GLB / FBX /
+  .blend (FBX/.blend via the existing Blender convert).
+  - Backend: `webapp/rig_pipeline.py` (orchestration + joint→marker mapping + ray-center),
+    `webapp/server.py` (`_unirig_run`, `_blender_python`, `unirig` health flag, `UNIRIG_DIR` /
+    `UNIRIG_PYTHON` / `UNIRIG_BASH` env), `webapp/blender_dump_skeleton.py`,
+    `webapp/blender_edit_skeleton.py`, `webapp/studio.py` (`rig` persistence, `_gpu_rig` /
+    `_gpu_reskin`, routes `POST /rig`, `/rig/apply`, `/rig/marker/{joint}`, rigged-GLB download
+    preference).
+  - Frontend: `components/studio/rig-panel.tsx`, marker hotspots + click-to-place in
+    `model-3d-viewer.tsx`, 3rd step in `workflow-panel.tsx`, shared `rigJoint`/`rigActive` in
+    `studio-provider.tsx`, `RigState` in `lib/types.ts`, `lib/api.ts`, `lib/mock-backend.ts`.
+  - Container wiring (mirrors MV-Adapter): `webapp/setup_unirig.sh` clones UniRig into an isolated
+    conda env on a persisted `unirig` volume; `docker-compose.yml` mounts it and sets `UNIRIG_DIR` +
+    `UNIRIG_PYTHON`. One-time: `docker compose exec hunyuan3d-studio bash webapp/setup_unirig.sh`.
+    Weights auto-download from HF `VAST-AI/UniRig` on first rig job.
+  - Joint→marker mapping is **geometry/topology-based**, not name-based: UniRig emits generic
+    `bone_{i}` names (its docs don't define anatomical names), so markers are inferred from the
+    skeleton tree + positions (chin = highest joint; ankles/hands = lowest/most-lateral leaves;
+    groin = LCA of the ankles; knees/elbows = mid-chain; shoulders = arm roots). Semantic bone names,
+    if present, are used first. Skeleton dump/edit convert Blender Z-up ↔ glTF Y-up so marker coords
+    match the viewer + the trimesh recenter ray.
+  - Runtime-validation items (untestable without a GPU host): the geometry mapping heuristics +
+    left/right-by-X convention against real UniRig skeletons, the setup-script wheel pins
+    (spconv/flash-attn/PyG for cu128/sm_120), and the rigged-GLB ↔ skeleton-FBX axis assumption used
+    when re-skinning edited joints.
+
 - **Hand-paint brush preview + undo.** The hand-paint surface now draws a brush-sized ring that
   tracks the cursor (tinted to the active color, white dashed for the eraser) on a dedicated overlay
   canvas, so it scales correctly under zoom/pan. `Ctrl+Z` / `Cmd+Z` undoes the last stroke (snapshot

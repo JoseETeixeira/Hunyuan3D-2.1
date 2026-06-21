@@ -25,7 +25,7 @@ from fastapi.responses import FileResponse, Response
 from PIL import Image
 from pydantic import BaseModel
 
-from webapp import reference_views
+from webapp import reference_views, rig_pipeline
 from webapp.reference_views import ALL_VIEWS, VIEW_INPUTS, VIEW_TO_TAG
 
 HERE = Path(__file__).resolve().parent
@@ -125,6 +125,37 @@ def _upload_blend_file(mid: str) -> Path:
     return _model_dir(mid) / "upload.blend"
 
 
+# Rig artifacts, flat in OUTPUT_DIR so /api/files + the Blender converter are reused (like the GLBs).
+def _rigged_glb(mid: str) -> Path:
+    return _assert_within(OUTPUT_DIR / f"{mid}_rigged.glb", OUTPUT_DIR)
+
+
+def _rig_skeleton_fbx(mid: str) -> Path:
+    return _assert_within(OUTPUT_DIR / f"{mid}_skeleton.fbx", OUTPUT_DIR)
+
+
+def _rig_skin_fbx(mid: str) -> Path:
+    return _assert_within(OUTPUT_DIR / f"{mid}_skin.fbx", OUTPUT_DIR)
+
+
+def _rig_skel_json(mid: str) -> Path:
+    return _assert_within(OUTPUT_DIR / f"{mid}_skel.json", OUTPUT_DIR)
+
+
+def _rig_edit_fbx(mid: str) -> Path:
+    return _assert_within(OUTPUT_DIR / f"{mid}_skeleton_edit.fbx", OUTPUT_DIR)
+
+
+def _rig_edit_spec(mid: str) -> Path:
+    return _assert_within(OUTPUT_DIR / f"{mid}_skel_edit_spec.json", OUTPUT_DIR)
+
+
+def _rig_input_mesh(mid: str) -> Path:
+    """Mesh fed to UniRig: the textured GLB if present (so the rig keeps the texture), else the shape."""
+    t = _textured_glb(mid)
+    return t if t.exists() else _shape_glb(mid)
+
+
 def _facerender_file(mid: str, view: str) -> Path:
     return _model_dir(mid) / f"facerender_{view}.png"
 
@@ -199,6 +230,8 @@ def _default_data(mid: str, name: str) -> dict:
         # into texture_history/{seq}.glb plus a metadata entry here, so any prior step is restorable.
         "textureHistory": [],
         "textureSeq": 0,
+        # Step 3 rig: UniRig markers (12 named joints), the bone each maps to (internal), stage.
+        "rig": {"stage": "none", "markers": {}, "markerBones": {}, "updatedAt": 0},
         "createdAt": _now_ms(),
         "updatedAt": _now_ms(),
     }
@@ -270,6 +303,18 @@ def _mesh_stats(mid: str):
     return stats
 
 
+def _rig_public(mid: str, data: dict, ver) -> dict:
+    """Public rig view: stage, marker positions (12 named joints), and the rigged-GLB url. The
+    internal joint->bone mapping is not exposed."""
+    rig = data.get("rig") or {}
+    return {
+        "stage": rig.get("stage", "none"),
+        "markers": rig.get("markers", {}),
+        "riggedUrl": (f"/api/files/{mid}_rigged.glb?v={ver}" if _rigged_glb(mid).exists() else None),
+        "updatedAt": rig.get("updatedAt", 0),
+    }
+
+
 def assemble_model(mid: str) -> dict:
     data = _load(mid)
     ver = data["updatedAt"]
@@ -293,6 +338,7 @@ def assemble_model(mid: str) -> dict:
         "meshSourceView": data.get("meshSourceView"),
         "textureHistory": [{"seq": e["seq"], "label": e["label"], "ts": e["ts"], "stage": e["stage"]}
                            for e in data.get("textureHistory", [])],
+        "rig": _rig_public(mid, data, ver),
         "createdAt": data["createdAt"],
         "updatedAt": data["updatedAt"],
     }
@@ -386,6 +432,10 @@ def run_gpu_job(kind: str, sjid: str) -> None:
             _gpu_mesh(sjid, mid, j["_cfg"])
         elif kind == "studio_mesh_upload":
             _gpu_mesh_upload(sjid, mid)
+        elif kind == "studio_rig":
+            _gpu_rig(sjid, mid)
+        elif kind == "studio_reskin":
+            _gpu_reskin(sjid, mid)
         elif kind == "studio_reface":
             _gpu_reface(sjid, mid, j["_view"], j.get("_edit"), face_mode="reface")
         elif kind == "studio_face_edit":
@@ -409,6 +459,11 @@ def run_gpu_job(kind: str, sjid: str) -> None:
             data = _load(mid)
             if kind == "studio_base" and data.get("textureStage") == "base-running":
                 data["textureStage"] = "none"
+                _save(mid, data)
+            elif kind in ("studio_rig", "studio_reskin"):
+                rig = data.setdefault("rig", {})
+                # A failed rig has no rigged file yet; a failed re-skin keeps the prior one.
+                rig["stage"] = "ready" if _rigged_glb(mid).exists() else "none"
                 _save(mid, data)
             else:
                 v = j.get("_view")
@@ -550,6 +605,49 @@ def _gpu_mesh_upload(sjid: str, mid: str) -> None:
     data["textureStage"] = "none"
     _save(mid, data)
     _clear_history(mid)
+
+
+def _gpu_rig(sjid: str, mid: str) -> None:
+    """Full AI rig: run UniRig (skeleton -> skin -> merge) on the mesh, map predicted joints to the
+    12 named markers, persist them + the rigged GLB. Failure leaves the model unrigged."""
+    mesh = _rig_input_mesh(mid)
+    if not mesh.exists():
+        raise RuntimeError("model has no mesh to rig")
+    set_job(sjid, status="processing", progress=15)
+    out = rig_pipeline.run_full(
+        str(mesh), str(_rig_skeleton_fbx(mid)), str(_rig_skin_fbx(mid)),
+        str(_rigged_glb(mid)), str(_rig_skel_json(mid)),
+    )
+    data = _load(mid)
+    rig = data.setdefault("rig", {})
+    rig["markers"] = out["markers"]
+    rig["markerBones"] = out["markerBones"]
+    rig["stage"] = "ready"
+    rig["updatedAt"] = _now_ms()
+    _save(mid, data)
+
+
+def _gpu_reskin(sjid: str, mid: str) -> None:
+    """Re-skin after marker edits: edit the base skeleton to the current marker positions, then run
+    UniRig skin + merge. Only markers that map to a predicted bone affect the rig."""
+    mesh = _rig_input_mesh(mid)
+    if not _rig_skeleton_fbx(mid).exists():
+        raise RuntimeError("no base skeleton; run rigging first")
+    data = _load(mid)
+    rig = data.get("rig") or {}
+    markers = rig.get("markers", {})
+    marker_bones = rig.get("markerBones", {})
+    moves = {marker_bones[k]: markers[k] for k in markers if k in marker_bones}
+    set_job(sjid, status="processing", progress=20)
+    rig_pipeline.run_reskin(
+        str(mesh), str(_rig_skeleton_fbx(mid)), str(_rig_edit_fbx(mid)),
+        str(_rig_skin_fbx(mid)), str(_rigged_glb(mid)), str(_rig_edit_spec(mid)), moves,
+    )
+    data = _load(mid)
+    rig = data.setdefault("rig", {})
+    rig["stage"] = "ready"
+    rig["updatedAt"] = _now_ms()
+    _save(mid, data)
 
 
 def _gpu_reface(sjid: str, mid: str, view: str, edit, face_mode="reface", ref_override=None) -> None:
@@ -704,6 +802,12 @@ class RenameIn(BaseModel):
 
 class GenerateIn(BaseModel):
     edit_prompt: str | None = None
+
+
+class RigMarkerIn(BaseModel):
+    # Surface hit + normal from the 3D viewer raycast (rigged-GLB coordinate space).
+    point: list[float]
+    normal: list[float]
 
 
 class MeshConfigIn(BaseModel):
@@ -951,6 +1055,58 @@ async def upload_mesh(mid: str, mesh: UploadFile = File(...)):
     return public_job(sjid)
 
 
+# --------------------------------------------------------------------------- routes: rig (step 3)
+@router.post("/api/models/{mid}/rig")
+def rig_model(mid: str):
+    """Auto-rig the mesh with UniRig and surface the 12 named joint markers."""
+    _vid(mid)
+    data = _load(mid)
+    if not _rig_input_mesh(mid).exists():
+        raise HTTPException(status_code=400, detail="Generate or upload a mesh first")
+    sjid = new_job("AI rigging", mid)
+    data.setdefault("rig", {})["stage"] = "rigging"
+    _save(mid, data)
+    submit_gpu("studio_rig", sjid)
+    return public_job(sjid)
+
+
+@router.post("/api/models/{mid}/rig/apply")
+def rig_apply(mid: str):
+    """Re-skin the rig after the user moved markers."""
+    _vid(mid)
+    data = _load(mid)
+    if not _rig_skeleton_fbx(mid).exists():
+        raise HTTPException(status_code=400, detail="Run rigging first")
+    sjid = new_job("Re-skinning rig", mid)
+    data.setdefault("rig", {})["stage"] = "reskinning"
+    _save(mid, data)
+    submit_gpu("studio_reskin", sjid)
+    return public_job(sjid)
+
+
+@router.post("/api/models/{mid}/rig/marker/{joint}")
+def rig_marker(mid: str, joint: str, body: RigMarkerIn):
+    """Move a joint marker to the limb center under a clicked surface point (CPU ray, no GPU)."""
+    _vid(mid)
+    if joint not in rig_pipeline.MARKERS:
+        raise HTTPException(status_code=400, detail=f"Unknown joint '{joint}'")
+    if len(body.point) != 3 or len(body.normal) != 3:
+        raise HTTPException(status_code=400, detail="point and normal must each have 3 numbers")
+    # Cast against the SAME mesh the viewer shows while editing (the rigged GLB), so the click point
+    # and the stored marker share one coordinate space; fall back to the input mesh pre-rig.
+    mesh = _rigged_glb(mid) if _rigged_glb(mid).exists() else _rig_input_mesh(mid)
+    if not mesh.exists():
+        raise HTTPException(status_code=400, detail="No mesh to place markers on")
+    pos = rig_pipeline.recenter(str(mesh), body.point, body.normal)
+
+    def _mut(data):
+        rig = data.setdefault("rig", {})
+        rig.setdefault("markers", {})[joint] = pos
+        rig["updatedAt"] = _now_ms()
+    _update(mid, _mut)
+    return assemble_model(mid)
+
+
 @router.post("/api/models/{mid}/texture/base")
 def texture_base(mid: str, cfg: MeshConfigIn = MeshConfigIn()):
     _vid(mid)
@@ -1114,7 +1270,10 @@ def download_model(mid: str, fmt: str):
     fmt = fmt.lower()
     if fmt not in FORMATS:
         raise HTTPException(status_code=400, detail=f"Unsupported format: {fmt}")
-    src = _textured_glb(mid)
+    # Prefer the rigged GLB (carries armature + skin); fall back to textured, then shape.
+    src = _rigged_glb(mid)
+    if not src.exists():
+        src = _textured_glb(mid)
     if not src.exists():
         src = _shape_glb(mid)
     if not src.exists():

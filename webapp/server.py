@@ -61,8 +61,17 @@ BLENDER_SCRIPT = HERE / "blender_convert.py"
 BLENDER_PROJECT_SCRIPT = HERE / "blender_project.py"
 BLENDER_BLEND_TO_GLB_SCRIPT = HERE / "blender_blend_to_glb.py"
 BLENDER_FILLHOLES_SCRIPT = HERE / "blender_fillholes.py"
+BLENDER_DUMP_SKELETON_SCRIPT = HERE / "blender_dump_skeleton.py"
+BLENDER_EDIT_SKELETON_SCRIPT = HERE / "blender_edit_skeleton.py"
 # Fill boundary holes (via Blender) on every generated shape so meshes are watertight by default.
 FILL_HOLES = os.environ.get("HY3D_FILL_HOLES", "1") not in ("0", "false", "False", "")
+
+# UniRig (https://github.com/VAST-AI-Research/UniRig) auto-rigging — runs in its OWN python env as a
+# subprocess (heavy, incompatible deps), like Blender. Point UNIRIG_DIR at the checkout and
+# UNIRIG_PYTHON at that venv's python; bash runs its launch/inference/*.sh scripts.
+UNIRIG_DIR = os.environ.get("UNIRIG_DIR", "")
+UNIRIG_PYTHON = os.environ.get("UNIRIG_PYTHON", "python")
+UNIRIG_BASH = os.environ.get("UNIRIG_BASH", "bash")
 EXPORT_FORMATS = ("glb", "fbx", "blend")
 
 # OpenAI image model used for projection texturing (missing-view fill + GPT texture mode).
@@ -691,6 +700,44 @@ def _fill_holes_glb(glb_path: str) -> None:
     os.replace(tmp_out, glb_path)
 
 
+def _blender_python(script_path, args, tag, expect_done):
+    """Run a headless Blender python script and require its done-sentinel in the output. Returns the
+    completed process. Mirrors _blender_convert/_blender_run for the small skeleton helper scripts."""
+    if not (shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)):
+        raise RuntimeError("Blender is not installed in this container (BLENDER_BIN)")
+    cmd = [BLENDER_BIN, "--background", "--python", str(script_path), "--", *[str(a) for a in args]]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or expect_done not in out:
+        raise RuntimeError(f"Blender {tag} failed: {out[-2000:]}")
+    return proc
+
+
+def unirig_available() -> bool:
+    return bool(UNIRIG_DIR and os.path.isdir(UNIRIG_DIR)
+                and (shutil.which(UNIRIG_PYTHON) or os.path.exists(UNIRIG_PYTHON)))
+
+
+def _unirig_run(script_rel: str, args, tag: str, timeout: int = 1800):
+    """Run a UniRig launch/inference/*.sh script in its own env. Raises on failure."""
+    if not unirig_available():
+        raise RuntimeError("UniRig is not installed (set UNIRIG_DIR + UNIRIG_PYTHON)")
+    script = os.path.join(UNIRIG_DIR, script_rel)
+    if not os.path.exists(script):
+        raise RuntimeError(f"UniRig script not found: {script}")
+    env = dict(os.environ)
+    # Make `python` inside the .sh resolve to the UniRig venv.
+    venv_bin = os.path.dirname(os.path.abspath(UNIRIG_PYTHON))
+    env["PATH"] = venv_bin + os.pathsep + env.get("PATH", "")
+    env.setdefault("PYTHON", UNIRIG_PYTHON)
+    cmd = [UNIRIG_BASH, script, *[str(a) for a in args]]
+    proc = subprocess.run(cmd, cwd=UNIRIG_DIR, capture_output=True, text=True, timeout=timeout, env=env)
+    if proc.returncode != 0:
+        out = (proc.stdout or "") + (proc.stderr or "")
+        raise RuntimeError(f"UniRig {tag} failed: {out[-3000:]}")
+    return proc
+
+
 def _blender_run(spec, job_id, tag, expect_done="BLENDER_PROJECT_DONE"):
     if not (shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)):
         raise RuntimeError("Blender is not installed in this container (BLENDER_BIN)")
@@ -760,6 +807,7 @@ def health():
         "model_error": WORKER["error"],
         "queue": WORK.qsize(),
         "blender": bool(shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)),
+        "unirig": unirig_available(),
         "openai": bool(os.environ.get("OPENAI_API_KEY")),
         "gemini": bool(os.environ.get("GEMINI_API_KEY")),
     }

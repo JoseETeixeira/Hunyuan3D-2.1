@@ -3,16 +3,18 @@
 import { useEffect, useState } from "react"
 import { allReferencesApproved, approvedCount } from "@/lib/workflow"
 import { ReferencesPanel } from "./references-panel"
+import { RigPanel } from "./rig-panel"
 import { useStudio } from "./studio-provider"
 import { TexturePanel } from "./texture-panel"
 
-type Step = "references" | "texture"
+type Step = "references" | "texture" | "rig"
 
 export function WorkflowPanel() {
   const { activeModel } = useStudio()
   const [step, setStep] = useState<Step>("references")
 
   const refsReady = activeModel ? allReferencesApproved(activeModel) : false
+  const hasMesh = !!(activeModel?.meshUrl || activeModel?.texturedUrl)
 
   // Auto-advance to texturing once everything is approved (first time only).
   useEffect(() => {
@@ -40,11 +42,39 @@ export function WorkflowPanel() {
           disabled={!refsReady && activeModel.textureStage === "none"}
           onClick={() => setStep("texture")}
         />
+        <div className="h-px flex-1 bg-border" />
+        <StepTab
+          n={3}
+          label="Rigging"
+          sub={rigSub(activeModel.rig?.stage)}
+          active={step === "rig"}
+          disabled={!hasMesh}
+          onClick={() => setStep("rig")}
+        />
       </div>
 
-      {step === "references" ? <ReferencesPanel model={activeModel} /> : <TexturePanel model={activeModel} />}
+      {step === "references" ? (
+        <ReferencesPanel model={activeModel} />
+      ) : step === "texture" ? (
+        <TexturePanel model={activeModel} />
+      ) : (
+        <RigPanel model={activeModel} />
+      )}
     </div>
   )
+}
+
+function rigSub(stage?: string) {
+  switch (stage) {
+    case "rigging":
+      return "rigging…"
+    case "reskinning":
+      return "re-skinning…"
+    case "ready":
+      return "rig ready"
+    default:
+      return "not started"
+  }
 }
 
 function textureSub(stage: string) {

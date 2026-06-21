@@ -3,7 +3,7 @@
 import { createContext, useCallback, useContext, useMemo, useState } from "react"
 import useSWR from "swr"
 import { api } from "@/lib/api"
-import type { Model, ModelSummary } from "@/lib/types"
+import type { MarkerId, Model, ModelSummary } from "@/lib/types"
 import { useJobRunner } from "@/lib/use-job"
 
 interface StudioContextValue {
@@ -24,6 +24,12 @@ interface StudioContextValue {
   jobError: string | null
   clearJobError: () => void
   runJob: (start: () => Promise<import("@/lib/types").Job>, label: string) => Promise<unknown>
+  // Step 3 rig: the joint marker currently selected for placement (shared by RigPanel + viewer).
+  rigJoint: MarkerId | null
+  setRigJoint: (joint: MarkerId | null) => void
+  // True while the Rigging step is open, so the 3D viewer shows markers + enables click-to-place.
+  rigActive: boolean
+  setRigActive: (v: boolean) => void
 }
 
 const StudioContext = createContext<StudioContextValue | null>(null)
@@ -32,6 +38,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const { data: models, isLoading, mutate } = useSWR<ModelSummary[]>("models", api.listModels)
   const [activeModel, setActiveModel] = useState<Model | null>(null)
   const [selecting, setSelecting] = useState(false)
+  const [rigJoint, setRigJoint] = useState<MarkerId | null>(null)
+  const [rigActive, setRigActive] = useState(false)
 
   const updateModel = useCallback(
     (model: Model) => {
@@ -99,6 +107,10 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       jobError,
       clearJobError: clearError,
       runJob,
+      rigJoint,
+      setRigJoint,
+      rigActive,
+      setRigActive,
     }),
     [
       models,
@@ -115,6 +127,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       jobError,
       clearError,
       runJob,
+      rigJoint,
+      rigActive,
     ],
   )
 
