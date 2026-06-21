@@ -1,6 +1,6 @@
 "use client"
 
-import { Box, Crosshair, Download } from "lucide-react"
+import { Box, Crosshair, Download, Upload } from "lucide-react"
 import { useRef, useState } from "react"
 import { api } from "@/lib/api"
 import type { Model } from "@/lib/types"
@@ -17,6 +17,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
   const [tab, setTab] = useState<"shape" | "tex">("tex")
   const [fmt, setFmt] = useState<string>("glb")
   const mvRef = useRef<HTMLElement | null>(null)
+  const blendInput = useRef<HTMLInputElement>(null)
 
   // Custom (free-camera) hand-paint state.
   const [customOpen, setCustomOpen] = useState(false)
@@ -53,6 +54,17 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     try {
       await runJob(() => api.renderCustomView(model.id, a.elev, a.azim), "Rendering custom view")
       setBackdrop(api.customRenderUrl(model.id, Date.now()))
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // Replace the mesh with an uploaded .blend (keeps references, resets texture so it can be re-built).
+  async function uploadBlend(file: File) {
+    if (!model) return
+    setBusy(true)
+    try {
+      await runJob(() => api.uploadMesh(model.id, file), "Importing .blend")
     } finally {
       setBusy(false)
     }
@@ -96,39 +108,64 @@ export function Model3DViewer({ model }: { model: Model | null }) {
             Textured
           </button>
         </div>
-        {model && (shapeUrl || texUrl) ? (
+        {model ? (
           <div className="flex items-center gap-1.5">
-            {texUrl ? (
-              <button
-                type="button"
-                onClick={paintThisAngle}
-                disabled={busy}
-                title="Hand-paint the model from the angle you're currently viewing"
-                className={buttonVariants({ variant: "secondary", size: "sm" })}
-              >
-                <Crosshair className="size-3.5" />
-                Paint this angle
-              </button>
-            ) : null}
-            <select
-              value={fmt}
-              onChange={(e) => setFmt(e.target.value)}
-              className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring"
-            >
-              {FORMATS.map((f) => (
-                <option key={f} value={f}>
-                  {f.toUpperCase()}
-                </option>
-              ))}
-            </select>
-            <a
-              href={api.downloadUrl(model.id, fmt)}
-              download
+            <button
+              type="button"
+              onClick={() => blendInput.current?.click()}
+              disabled={busy}
+              title="Upload a .blend to replace the mesh (keeps references, resets the texture)"
               className={buttonVariants({ variant: "secondary", size: "sm" })}
             >
-              <Download className="size-3.5" />
-              Export
-            </a>
+              <Upload className="size-3.5" />
+              Upload .blend
+            </button>
+            <input
+              ref={blendInput}
+              type="file"
+              accept=".blend"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0]
+                e.target.value = ""
+                if (f) uploadBlend(f)
+              }}
+            />
+            {shapeUrl || texUrl ? (
+              <>
+                {texUrl ? (
+                  <button
+                    type="button"
+                    onClick={paintThisAngle}
+                    disabled={busy}
+                    title="Hand-paint the model from the angle you're currently viewing"
+                    className={buttonVariants({ variant: "secondary", size: "sm" })}
+                  >
+                    <Crosshair className="size-3.5" />
+                    Paint this angle
+                  </button>
+                ) : null}
+                <select
+                  value={fmt}
+                  onChange={(e) => setFmt(e.target.value)}
+                  className="h-8 rounded-md border border-border bg-card px-2 text-xs text-foreground outline-none focus-visible:border-ring"
+                >
+                  {FORMATS.map((f) => (
+                    <option key={f} value={f}>
+                      {f.toUpperCase()}
+                    </option>
+                  ))}
+                </select>
+                <a
+                  href={api.downloadUrl(model.id, fmt)}
+                  download
+                  className={buttonVariants({ variant: "secondary", size: "sm" })}
+                >
+                  <Download className="size-3.5" />
+                  Export
+                </a>
+              </>
+            ) : null}
           </div>
         ) : null}
       </div>

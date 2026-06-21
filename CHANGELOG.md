@@ -12,9 +12,10 @@
   `mesh`) converts an uploaded `.blend` to the shape GLB via headless Blender
   (`webapp/blender_blend_to_glb.py`) and adopts it as a new untextured base: references + seed are
   kept, the current texture is reset (faces → pending, `textureStage` → none, history cleared) so it
-  can be re-textured on the new geometry. Surfaced as "Upload .blend" in the Texture panel.
-  `webapp/studio.py`, `webapp/server.py` (`_blender_blend_to_glb`), `webapp/studio-ui/lib/api.ts`
-  (`uploadMesh`), `webapp/studio-ui/components/studio/texture-panel.tsx`.
+  can be re-textured on the new geometry. Surfaced as an "Upload .blend" button on the 3D viewer
+  toolbar (always available once a model exists, every stage). `webapp/studio.py`, `webapp/server.py`
+  (`_blender_blend_to_glb`), `webapp/studio-ui/lib/api.ts` (`uploadMesh`),
+  `webapp/studio-ui/components/studio/model-3d-viewer.tsx`.
 - **Blender hole-fill on mesh generation.** Every generated shape now gets a headless Blender
   fill-holes pass (`webapp/blender_fillholes.py`: fill boundary loops → recalc normals →
   triangulate) so meshes come out watertight. Always-on, best-effort (a failed pass keeps the
