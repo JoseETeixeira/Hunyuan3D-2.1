@@ -59,6 +59,10 @@ _load_local_env()
 BLENDER_BIN = os.environ.get("BLENDER_BIN", "blender")
 BLENDER_SCRIPT = HERE / "blender_convert.py"
 BLENDER_PROJECT_SCRIPT = HERE / "blender_project.py"
+BLENDER_BLEND_TO_GLB_SCRIPT = HERE / "blender_blend_to_glb.py"
+BLENDER_FILLHOLES_SCRIPT = HERE / "blender_fillholes.py"
+# Fill boundary holes (via Blender) on every generated shape so meshes are watertight by default.
+FILL_HOLES = os.environ.get("HY3D_FILL_HOLES", "1") not in ("0", "false", "False", "")
 EXPORT_FORMATS = ("glb", "fbx", "blend")
 
 # OpenAI image model used for projection texturing (missing-view fill + GPT texture mode).
@@ -660,6 +664,31 @@ def _blender_convert(src_glb: str, out_path: str):
     if proc.returncode != 0 or not os.path.exists(out_path):
         tail = (proc.stderr or proc.stdout or "")[-600:]
         raise HTTPException(status_code=500, detail=f"Blender conversion failed: {tail}")
+
+
+def _blender_blend_to_glb(src_blend: str, out_glb: str):
+    """Import a .blend and export it as GLB via headless Blender (adopt as a new shape base)."""
+    if not (shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)):
+        raise HTTPException(status_code=503, detail="Blender is not installed in this container")
+    cmd = [BLENDER_BIN, "--background", "--python", str(BLENDER_BLEND_TO_GLB_SCRIPT), "--", src_blend, out_glb]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    if proc.returncode != 0 or "BLEND_TO_GLB_DONE" not in (proc.stdout or "") or not os.path.exists(out_glb):
+        tail = (proc.stderr or proc.stdout or "")[-600:]
+        raise HTTPException(status_code=500, detail=f"Blender .blend import failed: {tail}")
+
+
+def _fill_holes_glb(glb_path: str) -> None:
+    """Fill boundary holes in a GLB in place via headless Blender. Raises if Blender is missing
+    or the pass fails; callers treat hole-filling as best-effort and keep the original mesh."""
+    if not (shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)):
+        raise RuntimeError("Blender is not installed in this container (BLENDER_BIN)")
+    tmp_out = f"{glb_path}.filled.glb"
+    cmd = [BLENDER_BIN, "--background", "--python", str(BLENDER_FILLHOLES_SCRIPT), "--", glb_path, tmp_out]
+    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    out = (proc.stdout or "") + (proc.stderr or "")
+    if proc.returncode != 0 or "FILL_HOLES_DONE" not in out or not os.path.exists(tmp_out):
+        raise RuntimeError(f"Blender fill-holes failed: {out[-1500:]}")
+    os.replace(tmp_out, glb_path)
 
 
 def _blender_run(spec, job_id, tag, expect_done="BLENDER_PROJECT_DONE"):

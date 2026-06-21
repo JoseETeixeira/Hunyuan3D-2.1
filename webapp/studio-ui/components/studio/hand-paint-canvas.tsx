@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
 
 const MAX_ZOOM = 6
+const MAX_UNDO = 30
 
 // Hand-paint touch-up surface: the backdrop is a render of the face AS IT CURRENTLY LOOKS on the mesh,
 // and the user paints strokes on top with a palette pulled from the reference image. "Apply" exports an
@@ -26,8 +27,10 @@ export function HandPaintCanvas({
   downloadName?: string
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null)
+  const cursorRef = useRef<HTMLCanvasElement>(null)
   const viewportRef = useRef<HTMLDivElement>(null)
   const uploadInput = useRef<HTMLInputElement>(null)
+  const undoStack = useRef<ImageData[]>([])
   const drawing = useRef(false)
   const last = useRef<{ x: number; y: number } | null>(null)
   const panning = useRef(false)
@@ -54,9 +57,10 @@ export function HandPaintCanvas({
     const img = new Image()
     img.onload = () => setDim(Math.max(384, Math.min(1024, img.naturalWidth || 640)))
     img.src = backdropUrl
-    // A fresh backdrop resets the view (zoom/pan back to fit).
+    // A fresh backdrop resets the view (zoom/pan back to fit) and the undo history.
     setZoom(1)
     setPan({ x: 0, y: 0 })
+    undoStack.current = []
   }, [backdropUrl])
 
   // Pull a palette from the reference image so the user paints in the model's own colors.
@@ -98,6 +102,18 @@ export function HandPaintCanvas({
     return () => vp.removeEventListener("wheel", onWheel)
   }, [])
 
+  // Ctrl+Z / Cmd+Z undoes the last paint stroke.
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.key.toLowerCase() !== "z") return
+      if (busy || !backdropUrl) return
+      e.preventDefault()
+      undo()
+    }
+    window.addEventListener("keydown", onKey)
+    return () => window.removeEventListener("keydown", onKey)
+  }, [busy, backdropUrl])
+
   function ptr(e: React.PointerEvent<HTMLCanvasElement>) {
     const c = canvasRef.current!
     const r = c.getBoundingClientRect()
@@ -116,6 +132,45 @@ export function HandPaintCanvas({
     ctx.lineTo(b.x, b.y)
     ctx.stroke()
   }
+  // Snapshot the canvas before a stroke so it can be undone. The first snapshot of a fresh canvas is the
+  // empty state, so undoing every stroke lands back on a blank (not-dirty) canvas.
+  function snapshot() {
+    const c = canvasRef.current
+    if (!c) return
+    undoStack.current.push(c.getContext("2d")!.getImageData(0, 0, c.width, c.height))
+    if (undoStack.current.length > MAX_UNDO) undoStack.current.shift()
+  }
+  function undo() {
+    const c = canvasRef.current
+    const snap = undoStack.current.pop()
+    if (!c || !snap) return
+    c.getContext("2d")!.putImageData(snap, 0, 0)
+    setDirty(undoStack.current.length > 0)
+  }
+  // Brush preview ring, drawn on the overlay canvas in buffer pixels so it scales with zoom/pan for free.
+  function drawCursor(p: { x: number; y: number }) {
+    const cc = cursorRef.current
+    if (!cc) return
+    const ctx = cc.getContext("2d")
+    if (!ctx) return
+    ctx.clearRect(0, 0, cc.width, cc.height)
+    const r = size / 2
+    ctx.setLineDash(erase ? [6, 4] : [])
+    ctx.lineWidth = 2
+    ctx.strokeStyle = "rgba(0,0,0,0.6)"
+    ctx.beginPath()
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.lineWidth = 1
+    ctx.strokeStyle = erase ? "#ffffff" : color
+    ctx.beginPath()
+    ctx.arc(p.x, p.y, r, 0, Math.PI * 2)
+    ctx.stroke()
+  }
+  function clearCursor() {
+    const cc = cursorRef.current
+    cc?.getContext("2d")?.clearRect(0, 0, cc.width, cc.height)
+  }
   function down(e: React.PointerEvent<HTMLCanvasElement>) {
     if (busy || !backdropUrl) return
     e.currentTarget.setPointerCapture(e.pointerId)
@@ -127,8 +182,10 @@ export function HandPaintCanvas({
       return
     }
     drawing.current = true
+    snapshot()
     last.current = ptr(e)
     stroke(last.current, last.current)
+    drawCursor(last.current)
     setDirty(true)
   }
   function move(e: React.PointerEvent<HTMLCanvasElement>) {
@@ -141,8 +198,9 @@ export function HandPaintCanvas({
       setPan(clampPan({ x: panStart.current.panX + dx, y: panStart.current.panY + dy }, zoom, r.width, r.height))
       return
     }
-    if (!drawing.current) return
     const p = ptr(e)
+    drawCursor(p)
+    if (!drawing.current) return
     stroke(last.current!, p)
     last.current = p
   }
@@ -152,10 +210,15 @@ export function HandPaintCanvas({
     panning.current = false
     panStart.current = null
   }
+  function leave() {
+    up()
+    clearCursor()
+  }
   function clear() {
     const c = canvasRef.current
     if (!c) return
     c.getContext("2d")!.clearRect(0, 0, c.width, c.height)
+    undoStack.current = []
     setDirty(false)
   }
   function apply() {
@@ -208,7 +271,8 @@ export function HandPaintCanvas({
   }
 
   const swatches = ["#ffffff", "#000000", ...palette]
-  const cursor = !backdropUrl ? "default" : panMode ? "grab" : "crosshair"
+  // Hide the native cursor in paint mode so only the brush-preview ring shows.
+  const cursor = !backdropUrl ? "default" : panMode ? "grab" : "none"
 
   return (
     <div className="flex w-full flex-col items-center gap-3">
@@ -230,9 +294,15 @@ export function HandPaintCanvas({
               onPointerDown={down}
               onPointerMove={move}
               onPointerUp={up}
-              onPointerLeave={up}
+              onPointerLeave={leave}
               className="absolute inset-0 size-full touch-none"
               style={{ cursor }}
+            />
+            <canvas
+              ref={cursorRef}
+              width={dim}
+              height={dim}
+              className="pointer-events-none absolute inset-0 size-full"
             />
           </div>
         ) : (
@@ -331,7 +401,7 @@ export function HandPaintCanvas({
         <p className="text-[10px] text-muted-foreground">
           Painting on the current face. Strokes bake exactly where you draw — palette is sampled from the reference.
           Download the face to edit it elsewhere, or Upload an image to bake it straight on. Scroll to zoom; pan with
-          the Pan toggle or the middle mouse button.
+          the Pan toggle or the middle mouse button. Press Ctrl+Z (Cmd+Z) to undo the last stroke.
         </p>
       </div>
     </div>

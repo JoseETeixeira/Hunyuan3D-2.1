@@ -1,7 +1,7 @@
 "use client"
 
-import { Brush, Check, Expand, History, Layers, Loader2, Paintbrush, Pencil, RotateCcw, Settings2, Trash2, Undo2, Wand2 } from "lucide-react"
-import { useEffect, useState } from "react"
+import { Brush, Check, Expand, History, Layers, Loader2, Paintbrush, Pencil, RotateCcw, Settings2, Trash2, Undo2, Upload, Wand2 } from "lucide-react"
+import { useEffect, useRef, useState } from "react"
 import { api } from "@/lib/api"
 import { DEFAULT_MESH_CONFIG, type FaceMode, type MeshConfig, type Model, type ViewId } from "@/lib/types"
 import { ALL_VIEWS, VIEW_LABELS } from "@/lib/views"
@@ -42,8 +42,12 @@ export function TexturePanel({ model }: { model: Model }) {
     }
   }
 
+  const blendInput = useRef<HTMLInputElement>(null)
   async function generateMesh() {
     await runJob(() => api.generateMesh(model.id, sourceView, config), `Generating mesh from ${VIEW_LABELS[sourceView]}`)
+  }
+  async function uploadBlend(file: File) {
+    await runJob(() => api.uploadMesh(model.id, file), "Importing .blend")
   }
   async function buildTextures() {
     await runJob(() => api.textureBase(model.id, config), "Per-face AI paint")
@@ -133,6 +137,26 @@ export function TexturePanel({ model }: { model: Model }) {
             </div>
           </>
         )}
+
+        <Button variant="secondary" onClick={() => blendInput.current?.click()}>
+          <Upload className="size-4" />
+          Upload .blend (replace mesh, keep references)
+        </Button>
+        <input
+          ref={blendInput}
+          type="file"
+          accept=".blend"
+          hidden
+          onChange={(e) => {
+            const f = e.target.files?.[0]
+            e.target.value = ""
+            if (f) uploadBlend(f)
+          }}
+        />
+        <p className="text-[10px] text-muted-foreground">
+          Generated meshes are hole-filled automatically. Uploading a .blend swaps the geometry and
+          resets the texture — your references are kept, so you can re-texture the new shape.
+        </p>
       </div>
         <TextureHistory model={model} onRestore={restoreTo} busy={histBusy} />
       </div>

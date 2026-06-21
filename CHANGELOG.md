@@ -2,6 +2,25 @@
 
 ## Unreleased
 
+### Added
+- **Hand-paint brush preview + undo.** The hand-paint surface now draws a brush-sized ring that
+  tracks the cursor (tinted to the active color, white dashed for the eraser) on a dedicated overlay
+  canvas, so it scales correctly under zoom/pan. `Ctrl+Z` / `Cmd+Z` undoes the last stroke (snapshot
+  taken before each stroke, capped at 30; clearing or loading a new face resets the history).
+  `webapp/studio-ui/components/studio/hand-paint-canvas.tsx`.
+- **Upload a `.blend` to replace a model's mesh.** New `POST /api/models/:id/mesh/upload` (multipart
+  `mesh`) converts an uploaded `.blend` to the shape GLB via headless Blender
+  (`webapp/blender_blend_to_glb.py`) and adopts it as a new untextured base: references + seed are
+  kept, the current texture is reset (faces → pending, `textureStage` → none, history cleared) so it
+  can be re-textured on the new geometry. Surfaced as "Upload .blend" in the Texture panel.
+  `webapp/studio.py`, `webapp/server.py` (`_blender_blend_to_glb`), `webapp/studio-ui/lib/api.ts`
+  (`uploadMesh`), `webapp/studio-ui/components/studio/texture-panel.tsx`.
+- **Blender hole-fill on mesh generation.** Every generated shape now gets a headless Blender
+  fill-holes pass (`webapp/blender_fillholes.py`: fill boundary loops → recalc normals →
+  triangulate) so meshes come out watertight. Always-on, best-effort (a failed pass keeps the
+  original mesh), and disable-able via `HY3D_FILL_HOLES=0`. Runs in `_gpu_mesh` and the inline-shape
+  branch of `_gpu_base`. `webapp/studio.py`, `webapp/server.py` (`_fill_holes_glb`).
+
 ### Changed
 - **Studio UI source moved into the repo at `webapp/studio-ui/`** (was an external
   `Downloads/3-d-model-generation-workflow` checkout). Build flow unchanged: `cd webapp/studio-ui &&

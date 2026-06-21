@@ -121,6 +121,10 @@ def _textured_glb(mid: str) -> Path:
     return _assert_within(OUTPUT_DIR / f"{mid}_textured.glb", OUTPUT_DIR)
 
 
+def _upload_blend_file(mid: str) -> Path:
+    return _model_dir(mid) / "upload.blend"
+
+
 def _facerender_file(mid: str, view: str) -> Path:
     return _model_dir(mid) / f"facerender_{view}.png"
 
@@ -380,6 +384,8 @@ def run_gpu_job(kind: str, sjid: str) -> None:
             _gpu_base(sjid, mid, j["_cfg"])
         elif kind == "studio_mesh":
             _gpu_mesh(sjid, mid, j["_cfg"])
+        elif kind == "studio_mesh_upload":
+            _gpu_mesh_upload(sjid, mid)
         elif kind == "studio_reface":
             _gpu_reface(sjid, mid, j["_view"], j.get("_edit"), face_mode="reface")
         elif kind == "studio_face_edit":
@@ -414,6 +420,21 @@ def run_gpu_job(kind: str, sjid: str) -> None:
         fail_job(sjid, str(e))
 
 
+def _maybe_fill_holes(mid: str) -> None:
+    """Best-effort Blender hole-fill on the freshly generated shape (env-gated, default on).
+    Never fatal: a failed pass keeps the original mesh."""
+    from webapp import server
+    if not server.FILL_HOLES:
+        return
+    shape = _shape_glb(mid)
+    if not shape.exists():
+        return
+    try:
+        server._fill_holes_glb(str(shape))
+    except Exception as e:  # noqa: BLE001
+        print(f"[studio] fill-holes skipped for {mid}: {e}")
+
+
 def _gpu_base(sjid: str, mid: str, cfg) -> None:
     from webapp import server
     data = _load(mid)
@@ -437,6 +458,7 @@ def _gpu_base(sjid: str, mid: str, cfg) -> None:
             seed=int(cfg.seed), octree_resolution=int(cfg.octree_resolution),
             num_chunks=8000, face_count=int(cfg.mesh_faces),
         )
+        _maybe_fill_holes(mid)
 
     view_paths = {VIEW_TO_TAG[v]: str(_ref_file(mid, v)) for v in ALL_VIEWS if _ref_file(mid, v).exists()}
     src0 = str(seed_f) if seed_f.exists() else str(front_f)
@@ -486,6 +508,7 @@ def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
         seed=int(cfg.seed), octree_resolution=int(cfg.octree_resolution),
         num_chunks=8000, face_count=int(cfg.mesh_faces),
     )
+    _maybe_fill_holes(mid)
     # a new mesh invalidates any existing texture
     try:
         _textured_glb(mid).unlink()
@@ -501,6 +524,32 @@ def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
                           "seed": int(cfg.seed), "meshFaces": int(cfg.mesh_faces), "sourceView": view}
     _save(mid, data)
     _clear_history(mid)  # snapshots belong to the previous mesh's UV; drop them
+
+
+def _gpu_mesh_upload(sjid: str, mid: str) -> None:
+    """Adopt an uploaded .blend as the model's new (untextured) shape: convert it to the shape GLB,
+    then reset texture state like a regenerated mesh. References + seed are kept."""
+    from webapp import server
+    blend = _upload_blend_file(mid)
+    if not blend.exists():
+        raise RuntimeError("no uploaded .blend to import")
+    set_job(sjid, status="processing", progress=20)
+    server._blender_blend_to_glb(str(blend), str(_shape_glb(mid)))
+    try:
+        blend.unlink()
+    except FileNotFoundError:
+        pass
+    # a new mesh invalidates any existing texture (same reset as _gpu_mesh). meshSourceView is left
+    # untouched so it stays a valid ViewId for the regenerate control.
+    try:
+        _textured_glb(mid).unlink()
+    except FileNotFoundError:
+        pass
+    data = _load(mid)
+    data["faces"] = {v: {"status": "pending", "mode": None} for v in ALL_VIEWS}
+    data["textureStage"] = "none"
+    _save(mid, data)
+    _clear_history(mid)
 
 
 def _gpu_reface(sjid: str, mid: str, view: str, edit, face_mode="reface", ref_override=None) -> None:
@@ -880,6 +929,25 @@ def generate_mesh(mid: str, cfg: MeshGenIn = MeshGenIn()):
     sjid = new_job(f"Generating mesh from {cfg.source_view}", mid)
     set_job(sjid, _cfg=cfg)
     submit_gpu("studio_mesh", sjid)
+    return public_job(sjid)
+
+
+@router.post("/api/models/{mid}/mesh/upload")
+async def upload_mesh(mid: str, mesh: UploadFile = File(...)):
+    """Replace the model's shape with an uploaded .blend (converted to GLB), keeping references +
+    seed. Resets any existing texture so it can be re-built on the new geometry."""
+    _vid(mid)
+    _load(mid)  # 404 if the model is missing
+    if not (getattr(mesh, "filename", "") or "").lower().endswith(".blend"):
+        raise HTTPException(status_code=400, detail="Upload a .blend file")
+    raw = await mesh.read()
+    if not raw:
+        raise HTTPException(status_code=400, detail="Empty file")
+    dest = _upload_blend_file(mid)
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_bytes(raw)
+    sjid = new_job("Importing .blend", mid)
+    submit_gpu("studio_mesh_upload", sjid)
     return public_job(sjid)
 
 
