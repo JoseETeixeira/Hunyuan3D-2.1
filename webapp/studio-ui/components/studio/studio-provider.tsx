@@ -30,6 +30,9 @@ interface StudioContextValue {
   // True while the Rigging step is open, so the 3D viewer shows markers + enables click-to-place.
   rigActive: boolean
   setRigActive: (v: boolean) => void
+  // Bumped after a .blend upload so the workflow jumps straight to the Mesh & textures step.
+  meshUploadTick: number
+  notifyMeshUploaded: () => void
 }
 
 const StudioContext = createContext<StudioContextValue | null>(null)
@@ -40,6 +43,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
   const [selecting, setSelecting] = useState(false)
   const [rigJoint, setRigJoint] = useState<MarkerId | null>(null)
   const [rigActive, setRigActive] = useState(false)
+  const [meshUploadTick, setMeshUploadTick] = useState(0)
+  const notifyMeshUploaded = useCallback(() => setMeshUploadTick((t) => t + 1), [])
 
   const updateModel = useCallback(
     (model: Model) => {
@@ -111,6 +116,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       setRigJoint,
       rigActive,
       setRigActive,
+      meshUploadTick,
+      notifyMeshUploaded,
     }),
     [
       models,
@@ -129,6 +136,8 @@ export function StudioProvider({ children }: { children: React.ReactNode }) {
       runJob,
       rigJoint,
       rigActive,
+      meshUploadTick,
+      notifyMeshUploaded,
     ],
   )
 

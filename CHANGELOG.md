@@ -3,6 +3,18 @@
 ## Unreleased
 
 ### Added
+- **Uploaded `.blend` goes straight to texturing.** After a `.blend` import, the workflow now jumps to
+  the Mesh & textures step and the uploaded mesh is texturable directly — "Generate textures" reuses
+  the uploaded shape (no need to "Generate mesh" first; `_gpu_base` already reuses an existing shape
+  GLB). `studio-provider.tsx` (`notifyMeshUploaded`), `model-3d-viewer.tsx`, `workflow-panel.tsx`.
+- **Mesh versions — restore a model before a remesh or .blend import.** Both ops were destructive
+  (overwrote the shape GLB, dropped the texture, cleared the texture timeline) with no way back. Now,
+  before each remesh / `.blend` import, the backend snapshots the full mesh state (shape + textured +
+  rigged GLBs + the texture timeline + face/stage/rig/config) under `mesh_history/{seq}/`, keeping the
+  last 5. A new "Mesh versions" list in the Texture panel restores any of them instantly via
+  `POST /api/models/:id/mesh/restore/:seq`. `webapp/studio.py` (`_push_mesh_snapshot`,
+  `_restore_mesh_snapshot`, `meshHistory`/`meshSeq`), `webapp/studio-ui/lib/{types,api,mock-backend}.ts`,
+  `components/studio/texture-panel.tsx`.
 - **Step 3 — AI rigging (UniRig) with positionable joint markers.** A third workflow step rigs the
   model mesh with [UniRig](https://github.com/VAST-AI-Research/UniRig) (skeleton → skin → merge), run
   as a subprocess in its own env on the GPU worker lane (like Blender). It surfaces 12 named joints
@@ -61,6 +73,21 @@
   git-ignored by the project's own `.gitignore`.
 
 ### Fixed
+- **Viewer vertex count looked ~3x too high (e.g. 61k vs Blender's 16k).** The badge reported the raw
+  glTF vertex-buffer size, which stores one vertex per face-corner wherever normals (flat shading) or
+  UVs seam — so a flat-shaded mesh inflates ~3x (`verts ≈ 3 × faces`). `_mesh_stats` now reports
+  unique vertex *positions*, matching DCC tools like Blender. Geometry is unchanged (the split is
+  correct/required for glTF). `webapp/studio.py`.
+- **Remesh / .blend import left a stale rig.** Regenerating or replacing the mesh reset the texture
+  but not the rig, so the old `{id}_rigged.glb` (old geometry) lingered and was even preferred by
+  Export. Both now invalidate the rig (delete rig artifacts + reset the rig row); the prior rig is
+  still recoverable via Mesh versions. `webapp/studio.py` (`_invalidate_rig`).
+- **Uploading a modern `.blend` failed with "not a blend file".** Blend files are forward-only: the
+  container's tuned Blender 4.2 can't read files saved by Blender 5.x (new header). The Dockerfile now
+  also installs Blender 5.0.1 as `blender5`, and `_blender_blend_to_glb` uses it (`BLENDER_NEW_BIN`,
+  falling back to `blender` when absent) so modern uploads import while the texture/projection
+  pipeline stays on 4.2. The error now also hints at a version mismatch. Requires an image rebuild
+  (`docker compose up --build`). `Dockerfile`, `webapp/server.py`.
 - **3D viewer spun on its own.** The `<model-viewer>` had the `auto-rotate` attribute, so the model
   rotated without any input. Removed it — the viewer now only moves via mouse (`camera-controls`).
   `webapp/studio-ui/components/studio/model-3d-viewer.tsx`.

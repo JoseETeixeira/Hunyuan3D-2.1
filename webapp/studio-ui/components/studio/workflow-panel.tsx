@@ -10,7 +10,7 @@ import { TexturePanel } from "./texture-panel"
 type Step = "references" | "texture" | "rig"
 
 export function WorkflowPanel() {
-  const { activeModel } = useStudio()
+  const { activeModel, meshUploadTick } = useStudio()
   const [step, setStep] = useState<Step>("references")
 
   const refsReady = activeModel ? allReferencesApproved(activeModel) : false
@@ -20,6 +20,11 @@ export function WorkflowPanel() {
   useEffect(() => {
     if (refsReady && activeModel?.textureStage !== "none") setStep("texture")
   }, [refsReady, activeModel?.textureStage])
+
+  // A .blend upload lands you on Mesh & textures — the uploaded mesh is ready to texture directly.
+  useEffect(() => {
+    if (meshUploadTick > 0) setStep("texture")
+  }, [meshUploadTick])
 
   if (!activeModel) return null
 

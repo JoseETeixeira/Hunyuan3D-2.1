@@ -48,19 +48,27 @@ RUN conda install Ninja
 RUN conda install cuda -c nvidia/label/cuda-12.8.1 -y
 RUN conda install -c conda-forge libstdcxx-ng -y
 
-# ── PyTorch (CUDA 12.4) ─────────────────────────────────────────────────
-# torch cu128 / 2.7.x — required for RTX 50-series (Blackwell, sm_120) kernels.
-RUN pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
-    --index-url https://download.pytorch.org/whl/cu128
-
-# pip network resilience: the requirements install pulls many large wheels; a dropped
-# connection ("Response ended prematurely") should retry instead of failing the whole build.
+# pip network resilience: the installs pull many large wheels; a dropped connection ("Response ended
+# prematurely") must retry. PIP_RETRIES handles per-connection drops; the until-loops below retry the
+# WHOLE command (pip's internal retries don't always recover a mid-resolve stream truncation).
 ENV PIP_DEFAULT_TIMEOUT=120
 ENV PIP_RETRIES=10
+ENV PIP_PREFER_BINARY=1
+
+# ── PyTorch (CUDA 12.4) ─────────────────────────────────────────────────
+# torch cu128 / 2.7.x — required for RTX 50-series (Blackwell, sm_120) kernels.
+RUN n=0; until pip install torch==2.7.0 torchvision==0.22.0 torchaudio==2.7.0 \
+      --index-url https://download.pytorch.org/whl/cu128; do \
+      n=$((n+1)); [ "$n" -ge 5 ] && echo "torch install failed after $n attempts" && exit 1; \
+      echo "torch install retry $n after a network drop; sleeping 15s"; sleep 15; \
+    done
 
 # ── Python deps (cached on requirements.txt) ────────────────────────────
 COPY requirements.txt /workspace/Hunyuan3D-2.1/requirements.txt
-RUN pip install -r /workspace/Hunyuan3D-2.1/requirements.txt
+RUN n=0; until pip install -r /workspace/Hunyuan3D-2.1/requirements.txt; do \
+      n=$((n+1)); [ "$n" -ge 5 ] && echo "requirements install failed after $n attempts" && exit 1; \
+      echo "requirements install retry $n after a network drop; sleeping 15s"; sleep 15; \
+    done
 RUN pip install python-multipart==0.0.12
 # setuptools >=81 removed pkg_resources, which basicsr/realesrgan/pytorch-lightning
 # still import at runtime (paint model load fails with ModuleNotFoundError: pkg_resources).
@@ -109,6 +117,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     apt-get clean && rm -rf /var/lib/apt/lists/*
 # blender_project.py / blender_convert.py stay version-robust (CPU-Cycles default + node/colorspace
 # fallbacks) so they also work if an older Blender is present.
+
+# Second, NEWER Blender used ONLY to read user-uploaded .blend files (the texture pipeline stays on
+# the tuned 4.2 above). Blender's .blend format is forward-only: a 4.2 binary can't open files saved
+# by Blender 5.x (new header → "not a blend file"). Installing 5.0.x lets `blender_blend_to_glb.py`
+# (via BLENDER_NEW_BIN) import modern uploads while older scripts keep using `blender` (4.2).
+ARG BLENDER5_VERSION=5.0.1
+ARG BLENDER5_SERIES=5.0
+RUN wget -q "https://download.blender.org/release/Blender${BLENDER5_SERIES}/blender-${BLENDER5_VERSION}-linux-x64.tar.xz" \
+        -O /tmp/blender5.tar.xz && \
+    mkdir -p /opt/blender5 && tar -xf /tmp/blender5.tar.xz -C /opt/blender5 --strip-components=1 && \
+    ln -sf /opt/blender5/blender /usr/local/bin/blender5 && rm /tmp/blender5.tar.xz
 
 ENV LD_LIBRARY_PATH="/workspace/miniconda3/envs/hunyuan3d21/lib:${LD_LIBRARY_PATH}"
 ENV HF_HOME=/root/.cache/huggingface

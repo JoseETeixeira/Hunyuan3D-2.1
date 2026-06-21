@@ -41,6 +41,14 @@ export function TexturePanel({ model }: { model: Model }) {
       setHistBusy(false)
     }
   }
+  async function restoreMeshTo(seq: number) {
+    setHistBusy(true)
+    try {
+      updateModel(await api.restoreMesh(model.id, seq))
+    } finally {
+      setHistBusy(false)
+    }
+  }
 
   async function generateMesh() {
     await runJob(() => api.generateMesh(model.id, sourceView, config), `Generating mesh from ${VIEW_LABELS[sourceView]}`)
@@ -139,6 +147,7 @@ export function TexturePanel({ model }: { model: Model }) {
           a .blend from the 3D viewer toolbar.
         </p>
       </div>
+        <MeshHistory model={model} onRestore={restoreMeshTo} busy={histBusy} />
         <TextureHistory model={model} onRestore={restoreTo} busy={histBusy} />
       </div>
     )
@@ -282,6 +291,56 @@ function TextureHistory({
       </ul>
       <p className="mt-2 text-[10px] text-muted-foreground">
         Restoring rolls the whole-mesh texture back to that step. Re-texture forward from there.
+      </p>
+    </div>
+  )
+}
+
+function MeshHistory({
+  model,
+  onRestore,
+  busy,
+}: {
+  model: Model
+  onRestore: (seq: number) => void
+  busy: boolean
+}) {
+  const hist = model.meshHistory ?? []
+  if (!hist.length) return null
+  return (
+    <div className="rounded-xl border border-border bg-card p-3">
+      <div className="mb-2 flex items-center gap-2">
+        <Layers className="size-4 text-primary" />
+        <p className="text-sm font-medium">Mesh versions</p>
+        <span className="text-xs text-muted-foreground">
+          {hist.length} saved
+        </span>
+      </div>
+      <ul className="flex max-h-52 flex-col gap-1 overflow-y-auto">
+        {[...hist].reverse().map((e) => (
+          <li
+            key={e.seq}
+            className="flex items-center justify-between gap-2 rounded-md bg-background/60 px-2 py-1.5"
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <span className="font-mono text-[10px] text-muted-foreground">#{e.seq}</span>
+              <span className="truncate text-xs">{e.label}</span>
+            </div>
+            <Button
+              size="xs"
+              variant="ghost"
+              disabled={busy}
+              onClick={() => onRestore(e.seq)}
+              title={`Restore the mesh to "${e.label}"`}
+            >
+              <Undo2 className="size-3" />
+              Restore
+            </Button>
+          </li>
+        ))}
+      </ul>
+      <p className="mt-2 text-[10px] text-muted-foreground">
+        Restores the geometry, texture, and rig from before a remesh or .blend import (last 5 kept).
       </p>
     </div>
   )

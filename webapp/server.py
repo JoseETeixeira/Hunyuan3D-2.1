@@ -57,6 +57,9 @@ def _load_local_env():
 _load_local_env()
 
 BLENDER_BIN = os.environ.get("BLENDER_BIN", "blender")
+# Newer Blender used ONLY to read user-uploaded .blend files (a 4.2 binary can't open files saved by
+# Blender 5.x). Falls back to BLENDER_BIN when absent.
+BLENDER_NEW_BIN = os.environ.get("BLENDER_NEW_BIN", "blender5")
 BLENDER_SCRIPT = HERE / "blender_convert.py"
 BLENDER_PROJECT_SCRIPT = HERE / "blender_project.py"
 BLENDER_BLEND_TO_GLB_SCRIPT = HERE / "blender_blend_to_glb.py"
@@ -676,14 +679,21 @@ def _blender_convert(src_glb: str, out_path: str):
 
 
 def _blender_blend_to_glb(src_blend: str, out_glb: str):
-    """Import a .blend and export it as GLB via headless Blender (adopt as a new shape base)."""
-    if not (shutil.which(BLENDER_BIN) or os.path.exists(BLENDER_BIN)):
+    """Import a .blend and export it as GLB via headless Blender (adopt as a new shape base). Prefers
+    the newer Blender (BLENDER_NEW_BIN) so it can read modern .blend headers; falls back to the
+    default Blender when the newer one is absent."""
+    bin_ = BLENDER_NEW_BIN if (shutil.which(BLENDER_NEW_BIN) or os.path.exists(BLENDER_NEW_BIN)) else BLENDER_BIN
+    if not (shutil.which(bin_) or os.path.exists(bin_)):
         raise HTTPException(status_code=503, detail="Blender is not installed in this container")
-    cmd = [BLENDER_BIN, "--background", "--python", str(BLENDER_BLEND_TO_GLB_SCRIPT), "--", src_blend, out_glb]
+    cmd = [bin_, "--background", "--python", str(BLENDER_BLEND_TO_GLB_SCRIPT), "--", src_blend, out_glb]
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0 or "BLEND_TO_GLB_DONE" not in (proc.stdout or "") or not os.path.exists(out_glb):
         tail = (proc.stderr or proc.stdout or "")[-600:]
-        raise HTTPException(status_code=500, detail=f"Blender .blend import failed: {tail}")
+        hint = ""
+        if "not a blend file" in tail.lower():
+            hint = (f" — this .blend looks newer than the import Blender ('{bin_}'). Re-save it in a "
+                    "compatible Blender version, or update the server's Blender.")
+        raise HTTPException(status_code=500, detail=f"Blender .blend import failed: {tail}{hint}")
 
 
 def _fill_holes_glb(glb_path: str) -> None:

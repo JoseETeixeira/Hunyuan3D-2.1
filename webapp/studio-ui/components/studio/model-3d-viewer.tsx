@@ -13,7 +13,7 @@ import { useStudio } from "./studio-provider"
 const FORMATS = ["glb", "fbx", "blend"] as const
 
 export function Model3DViewer({ model }: { model: Model | null }) {
-  const { runJob, updateModel, rigActive, rigJoint, setRigJoint } = useStudio()
+  const { runJob, updateModel, rigActive, rigJoint, setRigJoint, notifyMeshUploaded } = useStudio()
   const [tab, setTab] = useState<"shape" | "tex">("tex")
   const [fmt, setFmt] = useState<string>("glb")
   const mvRef = useRef<HTMLElement | null>(null)
@@ -70,6 +70,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     setBusy(true)
     try {
       await runJob(() => api.uploadMesh(model.id, file), "Importing .blend")
+      notifyMeshUploaded() // jump the workflow to the Mesh & textures step — the mesh is ready to texture
     } finally {
       setBusy(false)
     }

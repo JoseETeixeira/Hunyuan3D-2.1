@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # One-time MV-Adapter SDXL setup in an ISOLATED conda env so it never perturbs the
-# Hunyuan paint environment. Run inside the container:
-#   docker compose exec hunyuan3d-studio bash webapp/setup_mvadapter.sh
+# Hunyuan paint environment. Run inside the running container (compose SERVICE is `hunyuan3d`, not
+# the container_name `hunyuan3d-studio`):
+#   docker compose exec hunyuan3d bash webapp/setup_mvadapter.sh
+#   # or, by container name:  docker exec -it hunyuan3d-studio bash webapp/setup_mvadapter.sh
 #
 # Downloads: SDXL base (~6.9G) + MV-Adapter ig2mv adapter (~3.6G) + VAE + BiRefNet
 # pull lazily from HuggingFace on the first texture job (cached in the hf-cache

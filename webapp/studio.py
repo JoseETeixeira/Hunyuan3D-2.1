@@ -156,6 +156,18 @@ def _rig_input_mesh(mid: str) -> Path:
     return t if t.exists() else _shape_glb(mid)
 
 
+def _invalidate_rig(mid: str, data: dict) -> None:
+    """A new mesh invalidates any rig — the skeleton/skin belong to the old geometry. Delete the rig
+    artifacts and reset the rig row (the prior rig is preserved in the mesh snapshot for restore)."""
+    for p in (_rigged_glb(mid), _rig_skeleton_fbx(mid), _rig_skin_fbx(mid),
+              _rig_skel_json(mid), _rig_edit_fbx(mid)):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            pass
+    data["rig"] = {"stage": "none", "markers": {}, "markerBones": {}, "updatedAt": _now_ms()}
+
+
 def _facerender_file(mid: str, view: str) -> Path:
     return _model_dir(mid) / f"facerender_{view}.png"
 
@@ -208,6 +220,99 @@ def _clear_history(mid: str) -> None:
         _save(mid, data)
 
 
+# --------------------------------------------------------------------------- mesh history (versions)
+# A destructive remesh / .blend import overwrites the shape GLB, drops the texture, and clears the
+# texture timeline. Before it does, snapshot the whole mesh state here so it can be restored.
+MESH_HISTORY_KEEP = 5
+
+
+def _mesh_history_dir(mid: str) -> Path:
+    d = _model_dir(mid) / "mesh_history"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _mesh_snapshot_dir(mid: str, seq: int) -> Path:
+    return _assert_within(_mesh_history_dir(mid) / str(int(seq)), _model_dir(mid))
+
+
+def _push_mesh_snapshot(mid: str, label: str) -> None:
+    """Back up the CURRENT mesh state (shape/textured/rigged GLBs + the texture timeline + face/stage/
+    rig/config) before a destructive remesh/import. No-op when there's no shape yet. Prunes to the
+    last MESH_HISTORY_KEEP versions."""
+    if not _shape_glb(mid).exists():
+        return
+    with _STORE_LOCK:
+        data = _load(mid)
+        seq = int(data.get("meshSeq", 0))
+        snap = _mesh_snapshot_dir(mid, seq)
+        snap.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_shape_glb(mid), snap / "shape.glb")
+        if _textured_glb(mid).exists():
+            shutil.copy2(_textured_glb(mid), snap / "textured.glb")
+        if _rigged_glb(mid).exists():
+            shutil.copy2(_rigged_glb(mid), snap / "rigged.glb")
+        th = _model_dir(mid) / "texture_history"
+        if th.exists():
+            shutil.copytree(th, snap / "texture_history", dirs_exist_ok=True)
+        meta = {
+            "faces": data.get("faces", {}),
+            "textureStage": data.get("textureStage", "none"),
+            "meshConfig": data.get("meshConfig"),
+            "meshSourceView": data.get("meshSourceView"),
+            "rig": data.get("rig", {}),
+            "textureHistory": data.get("textureHistory", []),
+            "textureSeq": data.get("textureSeq", 0),
+        }
+        (snap / "meta.json").write_text(json.dumps(meta), encoding="utf-8")
+        data.setdefault("meshHistory", []).append({"seq": seq, "label": label, "ts": _now_ms()})
+        data["meshSeq"] = seq + 1
+        while len(data["meshHistory"]) > MESH_HISTORY_KEEP:
+            old = data["meshHistory"].pop(0)
+            try:
+                shutil.rmtree(_mesh_snapshot_dir(mid, old["seq"]))
+            except FileNotFoundError:
+                pass
+        _save(mid, data)
+
+
+def _restore_mesh_snapshot(mid: str, seq: int) -> dict:
+    """Restore a prior mesh version: shape/textured/rigged GLBs, the texture timeline, and the
+    face/stage/rig/config rows. Later versions are kept so you can jump around."""
+    with _STORE_LOCK:
+        data = _load(mid)
+        entry = next((e for e in data.get("meshHistory", []) if e["seq"] == seq), None)
+        snap = _mesh_snapshot_dir(mid, seq)
+        if entry is None or not (snap / "shape.glb").exists():
+            raise HTTPException(status_code=404, detail="Mesh version not found")
+        shutil.copy2(snap / "shape.glb", _shape_glb(mid))
+        for fname, dest in (("textured.glb", _textured_glb(mid)), ("rigged.glb", _rigged_glb(mid))):
+            src = snap / fname
+            if src.exists():
+                shutil.copy2(src, dest)
+            else:
+                try:
+                    dest.unlink()
+                except FileNotFoundError:
+                    pass
+        th = _model_dir(mid) / "texture_history"
+        if th.exists():
+            shutil.rmtree(th)
+        src_th = snap / "texture_history"
+        if src_th.exists():
+            shutil.copytree(src_th, th)
+        meta = json.loads((snap / "meta.json").read_text(encoding="utf-8"))
+        data["faces"] = meta.get("faces", data["faces"])
+        data["textureStage"] = meta.get("textureStage", "none")
+        data["meshConfig"] = meta.get("meshConfig")
+        data["meshSourceView"] = meta.get("meshSourceView")
+        data["rig"] = meta.get("rig", {"stage": "none", "markers": {}, "markerBones": {}, "updatedAt": 0})
+        data["textureHistory"] = meta.get("textureHistory", [])
+        data["textureSeq"] = meta.get("textureSeq", 0)
+        _save(mid, data)
+    return assemble_model(mid)
+
+
 def _base_snapshot_seq(data: dict):
     """Seq of the base snapshot to revert a single face toward: the earliest recorded snapshot
     (base texturing is always the first texture op). Returns None if there is no history."""
@@ -230,6 +335,9 @@ def _default_data(mid: str, name: str) -> dict:
         # into texture_history/{seq}.glb plus a metadata entry here, so any prior step is restorable.
         "textureHistory": [],
         "textureSeq": 0,
+        # Mesh versions: pre-remesh/pre-import snapshots (shape+textured+rigged+texture timeline+meta).
+        "meshHistory": [],
+        "meshSeq": 0,
         # Step 3 rig: UniRig markers (12 named joints), the bone each maps to (internal), stage.
         "rig": {"stage": "none", "markers": {}, "markerBones": {}, "updatedAt": 0},
         "createdAt": _now_ms(),
@@ -294,9 +402,14 @@ def _mesh_stats(mid: str):
     if cached and cached[0] == sig:
         return cached[1]
     try:
+        import numpy as np
         import trimesh
         mesh = trimesh.load(str(glb), force="mesh")
-        stats = {"faces": int(len(mesh.faces)), "vertices": int(len(mesh.vertices))}
+        # glTF stores one vertex per face-corner wherever normals (flat shading) or UVs seam, which
+        # inflates the raw buffer ~3x. Report UNIQUE POSITIONS so the count matches DCC tools (Blender).
+        verts = np.asarray(mesh.vertices)
+        unique = int(np.unique(np.round(verts, 5), axis=0).shape[0]) if len(verts) else 0
+        stats = {"faces": int(len(mesh.faces)), "vertices": unique}
     except Exception:  # noqa: BLE001 — a missing/invalid mesh just yields no count
         return None
     _MESH_STATS_CACHE[mid] = (sig, stats)
@@ -338,6 +451,8 @@ def assemble_model(mid: str) -> dict:
         "meshSourceView": data.get("meshSourceView"),
         "textureHistory": [{"seq": e["seq"], "label": e["label"], "ts": e["ts"], "stage": e["stage"]}
                            for e in data.get("textureHistory", [])],
+        "meshHistory": [{"seq": e["seq"], "label": e["label"], "ts": e["ts"]}
+                        for e in data.get("meshHistory", [])],
         "rig": _rig_public(mid, data, ver),
         "createdAt": data["createdAt"],
         "updatedAt": data["updatedAt"],
@@ -556,6 +671,7 @@ def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
     if not ref_f.exists():
         raise RuntimeError(f"the '{view}' reference has no image")
     set_job(sjid, status="processing", progress=20)
+    _push_mesh_snapshot(mid, f"Before remesh from {view}")  # back up the current mesh so it's restorable
     worker = server._ensure_model()
     worker.generate_shape(
         uid=mid, image=Image.open(ref_f).convert("RGBA"), remove_background=True,
@@ -572,6 +688,7 @@ def _gpu_mesh(sjid: str, mid: str, cfg) -> None:
     data = _load(mid)
     data["faces"] = {v: {"status": "pending", "mode": None} for v in ALL_VIEWS}
     data["textureStage"] = "none"
+    _invalidate_rig(mid, data)
     data["meshSourceView"] = view
     data["meshConfig"] = {"inferenceSteps": int(cfg.inference_steps),
                           "guidanceScale": float(cfg.guidance_scale),
@@ -589,6 +706,7 @@ def _gpu_mesh_upload(sjid: str, mid: str) -> None:
     if not blend.exists():
         raise RuntimeError("no uploaded .blend to import")
     set_job(sjid, status="processing", progress=20)
+    _push_mesh_snapshot(mid, "Before .blend import")  # back up the current mesh so it's restorable
     server._blender_blend_to_glb(str(blend), str(_shape_glb(mid)))
     try:
         blend.unlink()
@@ -603,6 +721,7 @@ def _gpu_mesh_upload(sjid: str, mid: str) -> None:
     data = _load(mid)
     data["faces"] = {v: {"status": "pending", "mode": None} for v in ALL_VIEWS}
     data["textureStage"] = "none"
+    _invalidate_rig(mid, data)
     _save(mid, data)
     _clear_history(mid)
 
@@ -1053,6 +1172,14 @@ async def upload_mesh(mid: str, mesh: UploadFile = File(...)):
     sjid = new_job("Importing .blend", mid)
     submit_gpu("studio_mesh_upload", sjid)
     return public_job(sjid)
+
+
+@router.post("/api/models/{mid}/mesh/restore/{seq}")
+def restore_mesh(mid: str, seq: int):
+    """Restore a prior mesh version (snapshot taken before a remesh/.blend import): geometry, texture,
+    rig, and the texture timeline. Instant (file copy)."""
+    _vid(mid)
+    return _restore_mesh_snapshot(mid, seq)
 
 
 # --------------------------------------------------------------------------- routes: rig (step 3)
