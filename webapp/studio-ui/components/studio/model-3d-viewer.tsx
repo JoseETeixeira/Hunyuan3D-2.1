@@ -112,8 +112,8 @@ export function Model3DViewer({ model }: { model: Model | null }) {
 
   return (
     <div className="flex h-full flex-col gap-3">
-      <div className="flex items-center justify-between gap-2">
-        <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+      <div className="flex flex-col gap-2">
+        <div className="flex w-fit items-center gap-1 rounded-lg border border-border bg-card p-1">
           <button
             type="button"
             onClick={() => setTab("shape")}
@@ -136,7 +136,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
           </button>
         </div>
         {model ? (
-          <div className="flex items-center gap-1.5">
+          <div className="flex flex-wrap items-center gap-1.5">
             <button
               type="button"
               onClick={() => blendInput.current?.click()}
