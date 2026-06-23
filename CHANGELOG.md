@@ -3,6 +3,18 @@
 ## Unreleased
 
 ### Added
+- **Hand paint — "AI fix" a captured view with Gemini.** The hand-paint surface gets an **AI fix**
+  button: it flattens the captured face render plus any strokes and sends it to Gemini with a prompt
+  that keeps the existing style + base colours and repairs only inconsistencies (seams, projection
+  smears, stretched/blurry patches, colour bleed, artefacts) — the cleaned image bakes onto the face
+  through the existing overlay path. The prompt reuses `image_edit.CARTOON_STYLE`/`CONSISTENCY_RULE`
+  plus a new `HANDPAINT_FIX_PROMPT`, and runs with `prefer="gemini"` (layout-preserving so the bake
+  stays aligned; falls back to gpt-image if no Gemini key). Works for canonical faces and the custom
+  free-camera view; an optional `edit_prompt` steers a specific touch-up. New endpoint
+  `POST /api/models/:id/faces/:view/handpaint-ai` (job kind `studio_handpaint_ai` → `_gpu_handpaint_ai`).
+  Files: `webapp/image_edit.py`, `webapp/studio.py`, `webapp/studio-ui/lib/api.ts`,
+  `components/studio/{hand-paint-canvas,texture-panel,model-3d-viewer}.tsx`, built → `webapp/webui/`;
+  `webapp/test_studio_api.py` (`test_handpaint_ai_endpoint`).
 - **GPU-aware image build + guaranteed first-run model download.** New `build.ps1` (Windows) and
   `build.sh` (Linux/WSL) wrappers read the host GPU's CUDA compute capability from
   `nvidia-smi --query-gpu=compute_cap` (name→arch fallback for old drivers; multi-GPU unioned) and

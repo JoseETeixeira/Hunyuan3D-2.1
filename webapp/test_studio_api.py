@@ -311,6 +311,40 @@ def test_custom_view_render_and_handpaint():
         studio.submit_gpu = orig
 
 
+def test_handpaint_ai_endpoint():
+    c = _client()
+    mid = _create(c, "AIFix")
+    png = _png()
+    # no texture yet -> 400
+    assert c.post(f"/api/models/{mid}/faces/front/handpaint-ai",
+                  files={"image": ("c.png", png, "image/png")}).status_code == 400
+    (studio.OUTPUT_DIR / f"{mid}_textured.glb").write_bytes(b"glb")
+    calls = []
+    orig = studio.submit_gpu
+    studio.submit_gpu = lambda kind, sjid: calls.append((kind, sjid, dict(studio.STUDIO_JOBS[sjid])))
+    try:
+        # canonical face: dispatches studio_handpaint_ai, carries the capture + edit, marks texturing
+        r = c.post(f"/api/models/{mid}/faces/front/handpaint-ai",
+                   files={"image": ("c.png", png, "image/png")}, data={"edit_prompt": "sharpen the seam"})
+        assert r.status_code == 200
+        kind, _, job = calls[-1]
+        assert kind == "studio_handpaint_ai" and job["_view"] == "front"
+        assert job["_image"] and job["_edit"] == "sharpen the seam"
+        assert c.get(f"/api/models/{mid}").json()["faces"]["front"]["status"] == "texturing"
+        # custom view: needs elev+azim, touches no face slot
+        assert c.post(f"/api/models/{mid}/faces/custom/handpaint-ai",
+                      files={"image": ("c.png", png, "image/png")}).status_code == 400
+        r = c.post(f"/api/models/{mid}/faces/custom/handpaint-ai",
+                   files={"image": ("c.png", png, "image/png")}, data={"elev": "20", "azim": "200"})
+        assert r.status_code == 200
+        kind, _, job = calls[-1]
+        assert kind == "studio_handpaint_ai" and job["_view"] == "custom"
+        assert job["_elev"] == 20.0 and job["_azim"] == 200.0
+        assert "custom" not in c.get(f"/api/models/{mid}").json()["faces"]
+    finally:
+        studio.submit_gpu = orig
+
+
 if __name__ == "__main__":
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
