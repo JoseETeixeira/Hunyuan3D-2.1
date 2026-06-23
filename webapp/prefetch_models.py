@@ -21,8 +21,18 @@ def main() -> int:
 
     from huggingface_hub import snapshot_download
 
-    print(f"[prefetch] ensuring {repo} weights in {cache} "
-          f"(first run downloads tens of GB; later runs are instant) ...", flush=True)
+    # Presence check first: local_files_only does NO network and returns the cached
+    # snapshot path only if every file is already there. If so, skip the download
+    # entirely — we only hit the network when weights are actually missing.
+    try:
+        path = snapshot_download(repo, allow_patterns=allow_patterns, local_files_only=True)
+        print(f"[prefetch] {repo} already present at {path}; skipping download.", flush=True)
+        return 0
+    except Exception:  # noqa: BLE001  (any miss -> fall through to download)
+        pass
+
+    print(f"[prefetch] {repo} weights missing; downloading into {cache} "
+          f"(first run is tens of GB) ...", flush=True)
     try:
         path = snapshot_download(repo, token=token, allow_patterns=allow_patterns)
         print(f"[prefetch] {repo} ready at {path}", flush=True)
