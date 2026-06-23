@@ -5,6 +5,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      args:
+        # Compute capability for the native CUDA extensions. Set by build.ps1 / build.sh
+        # from `nvidia-smi --query-gpu=compute_cap` so the image is compiled for the host
+        # GPU (e.g. 8.6 for a 3080 Ti, 12.0 for a 5080). Defaults to RTX 50-series.
+        TORCH_CUDA_ARCH_LIST: ${TORCH_CUDA_ARCH_LIST:-12.0}
     image: hunyuan3d21-studio:latest
     container_name: hunyuan3d-studio
     ports:

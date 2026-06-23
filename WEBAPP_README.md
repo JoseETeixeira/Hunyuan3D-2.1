@@ -16,15 +16,26 @@ single Docker command.
 
 ## Run it (one command)
 
+Use the build wrapper so the native CUDA extensions are compiled for **your** GPU. It
+reads the compute capability from `nvidia-smi` (e.g. 8.6 for a 3080 Ti, 12.0 for a 5080)
+and passes it to the build as `TORCH_CUDA_ARCH_LIST`:
+
 ```bash
-docker compose up --build
+# Windows (PowerShell)
+./build.ps1
+
+# Linux / WSL
+./build.sh
 ```
+
+Plain `docker compose up --build` still works, but it falls back to the default arch
+(`12.0`, RTX 50-series) unless you set `TORCH_CUDA_ARCH_LIST` yourself.
 
 Then open <http://localhost:8080>.
 
-> First launch builds the image (large — pulls CUDA, PyTorch, native extensions) and
-> the first generation downloads the Hunyuan3D-2.1 weights from HuggingFace (tens of GB,
-> cached in the `hf-cache` volume for next time).
+> First launch builds the image (large — pulls CUDA, PyTorch, native extensions). On the
+> first container start the entrypoint prefetches the Hunyuan3D-2.1 weights from HuggingFace
+> (shape + paint, tens of GB) into the `hf-cache` volume, so subsequent starts are instant.
 
 ### Requirements
 

@@ -24,7 +24,9 @@ ENV PATH=${CUDA_HOME}/bin:${PATH}
 ENV LD_LIBRARY_PATH=${CUDA_HOME}/lib64:${LD_LIBRARY_PATH}
 # GPU compute capability for the native CUDA extensions (custom_rasterizer, mesh painter).
 # Default to just the RTX 50-series (Blackwell, sm_120 = "12.0") so nvcc doesn't compile for
-# six architectures. Override for other GPUs, e.g. --build-arg TORCH_CUDA_ARCH_LIST="8.6;12.0".
+# six architectures. Auto-set per host GPU by build.ps1 / build.sh (which read it from
+# `nvidia-smi --query-gpu=compute_cap`); override manually with
+# --build-arg TORCH_CUDA_ARCH_LIST="8.6;12.0".
 ARG TORCH_CUDA_ARCH_LIST="12.0"
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
@@ -145,4 +147,9 @@ RUN sed -i 's/self\.multiview_cfg_path = "cfgs\/hunyuan-paint-pbr\.yaml"/self.mu
     sed -i 's/custom_pipeline = config\.custom_pipeline/custom_pipeline = os.path.join(os.path.dirname(__file__),"..","hunyuanpaintpbr")/' hy3dpaint/utils/multiview_utils.py
 
 EXPOSE 8080
-CMD ["python", "-m", "webapp.server", "--host", "0.0.0.0", "--port", "8080"]
+# Prefetch core model weights into the persisted HF cache on first start, then run the
+# server. The entrypoint runs the given command (CMD here, or compose's `command:`) via
+# `exec "$@"`, so flags stay overridable. --preload warms the model so the first job
+# doesn't pay the load cost.
+ENTRYPOINT ["bash", "docker/entrypoint.sh"]
+CMD ["python", "-m", "webapp.server", "--host", "0.0.0.0", "--port", "8080", "--preload"]

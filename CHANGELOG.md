@@ -3,6 +3,17 @@
 ## Unreleased
 
 ### Added
+- **GPU-aware image build + guaranteed first-run model download.** New `build.ps1` (Windows) and
+  `build.sh` (Linux/WSL) wrappers read the host GPU's CUDA compute capability from
+  `nvidia-smi --query-gpu=compute_cap` (name→arch fallback for old drivers; multi-GPU unioned) and
+  build with the native CUDA extensions (`custom_rasterizer`, mesh painter) compiled for exactly that
+  arch — e.g. `8.6` on a 3080 Ti, `12.0` on a 5080 — instead of the hardcoded `12.0`. The compose
+  `build.args` wires `TORCH_CUDA_ARCH_LIST` (default `12.0`). On first container start a new entrypoint
+  (`docker/entrypoint.sh` → `webapp/prefetch_models.py`) prefetches the `tencent/Hunyuan3D-2.1` weights
+  (shape + paint) into the `hf-cache` volume; idempotent, so later starts only do a cheap etag check.
+  The baked `Dockerfile` CMD now `--preload`s too. Files: `build.ps1`, `build.sh`,
+  `docker/entrypoint.sh`, `webapp/prefetch_models.py`, `Dockerfile`, `docker-compose.yml`,
+  `WEBAPP_README.md`.
 - **An already-textured `.blend` imports as a textured model — paint it without re-texturing.** On
   `.blend` import the backend now detects an embedded base-color texture (`_glb_has_texture`); if
   present, the converted GLB is registered as the textured model (copied to `{id}_textured.glb`, stage
