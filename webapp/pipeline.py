@@ -202,6 +202,26 @@ def _extract_base_texture(mesh, glb_path):
     return None
 
 
+def _mv_cam_to_render(render, radius=None, center=None):
+    """Map a model-viewer camera (GLB-space orbit radius + pan target) into the renderer's normalized
+    frame. set_mesh remaps GLB axes as R(P)=(-x, z, -y) then normalizes (P - C)*s (C/s are the stored
+    mesh_normalize_scale_center / _factor); the remap is orthonormal so distances just scale by s.
+    Returns (camera_distance, center) for get_mv_matrix / back_project — each None when its input is
+    None, so the default orthographic face camera (origin pivot, fixed distance) is left unchanged."""
+    import numpy as np
+    cam_dist = None
+    cam_center = None
+    s = float(render.mesh_normalize_scale_factor)
+    if radius is not None:
+        cam_dist = float(radius) * s
+    if center is not None:
+        C = render.mesh_normalize_scale_center[0]
+        tx, ty, tz = float(center[0]), float(center[1]), float(center[2])
+        remapped = np.array([-tx, tz, -ty], dtype=np.float32)  # set_mesh axis remap (MeshRender.set_mesh)
+        cam_center = ((remapped - C) * s).tolist()
+    return cam_dist, cam_center
+
+
 class TextureWorker:
     """Loads the shape + paint pipelines once and exposes step-wise generation."""
 
@@ -748,14 +768,20 @@ class TextureWorker:
         return textured_path
 
     @torch.inference_mode()
-    def paint_overlay(self, uid: str, textured_glb_path: str, elev: float, azim: float, overlay):
+    def paint_overlay(self, uid: str, textured_glb_path: str, elev: float, azim: float, overlay,
+                      fov=None, radius=None, center=None):
         """Bake a HAND-PAINTED overlay straight onto an already-textured mesh at the (elev, azim) face
         camera. `overlay` is a PIL RGBA already aligned to that camera's render (the user painted ON the
         face render), its alpha marking the strokes. No rembg / silhouette-fit — the strokes are
         pixel-locked to the camera — so only the painted, visible, camera-facing texels are composited
-        over the existing base; every other texel is untouched. Albedo-only matte, like reface."""
+        over the existing base; every other texel is untouched. Albedo-only matte, like reface.
+
+        (fov, radius, center) — when supplied (the free-camera "Paint this angle" path) — bake through
+        model-viewer's PERSPECTIVE camera, the SAME one render_textured_view drew the backdrop with, so
+        the overlay lands exactly where painted. Omitted -> the default orthographic face camera."""
         import numpy as np
         import trimesh
+        from DifferentiableRenderer.camera_utils import get_perspective_projection_matrix
         elev, azim = float(elev), float(azim)
         pp = self.paint_pipeline
         render = pp.render
@@ -771,7 +797,26 @@ class TextureWorker:
 
         ov = np.asarray(overlay.convert("RGBA").resize((rs, rs))).astype(np.float32) / 255.0
         ov[..., 3] = (ov[..., 3] > 0.5).astype(np.float32)  # bake only the painted strokes
-        new_tex, cos_map, _ = render.back_project(ov, elev, azim)
+        # Free-camera bake: map model-viewer's orbit distance/pan target into the renderer frame, and
+        # swap the shared ortho projection for a perspective one (restored below) so the bake camera
+        # equals the render camera. None -> default ortho face camera (distance 1.45, origin pivot).
+        cam_dist, cam_center = _mv_cam_to_render(render, radius, center)
+        # The user painted ON the render, so every rasterized (visible) pixel is fair game — including
+        # near-grazing side faces (e.g. a car's rear quarter at a 3/4 camera). back_project's default
+        # cosine gate (bake_angle_thres=75°) zeros those, so the strokes there silently don't bake. For
+        # a hand-paint/AI-fix overlay we widen the gate so visible-but-grazing texels bake too, then
+        # restore it (render is the shared pipeline renderer, reused by hyface/reface). Tune/disable via
+        # PAINT_OVERLAY_ANGLE_THRES (degrees; 90 ≈ everything visible, lower = stricter).
+        _saved_thres = render.bake_angle_thres
+        render.bake_angle_thres = max(_saved_thres, float(os.environ.get("PAINT_OVERLAY_ANGLE_THRES", "85")))
+        _saved_proj = render.camera_proj_mat
+        if fov is not None:
+            render.camera_proj_mat = get_perspective_projection_matrix(float(fov), 1.0, 0.01, 100.0)
+        try:
+            new_tex, cos_map, _ = render.back_project(ov, elev, azim, camera_distance=cam_dist, center=cam_center)
+        finally:
+            render.bake_angle_thres = _saved_thres
+            render.camera_proj_mat = _saved_proj
         fg_uv = (cos_map[..., 0] > 1e-4) & (new_tex[..., 3] > 0.5)
         out = base.clone()
         out[fg_uv] = new_tex[..., :3][fg_uv]
@@ -821,18 +866,27 @@ class TextureWorker:
         return Image.fromarray(img)
 
     @torch.inference_mode()
-    def render_textured_view(self, textured_glb_path: str, elev: float, azim: float):
+    def render_textured_view(self, textured_glb_path: str, elev: float, azim: float,
+                             fov=None, radius=None, center=None):
         """Forward-render the ALREADY-textured mesh at one camera: EXACT geometry + the existing baked
         colours, white background. This is the geometry-locked canvas reface restyles toward the
         references. Because it is a COMPLETE colour render (not a grey geom), the image model keeps ITS
         geometry and only takes colour/style from the references — a grey/partial image instead loses
         its shape to a full-colour reference (the genview-drift bug). Same camera path as back_project
-        so the result aligns to the bake. Convention mirrors webapp/glb_faces.py."""
+        so the result aligns to the bake. Convention mirrors webapp/glb_faces.py.
+
+        Default camera is the orthographic face camera (ortho_scale 1.2, fixed distance, origin pivot).
+        When (fov, radius, center) are supplied — the free-camera "Paint this angle" path — match
+        model-viewer's PERSPECTIVE camera instead: `fov` is its VERTICAL fov in degrees (rendered
+        square = the centre square of the live viewport), `radius`/`center` are its GLB-space orbit
+        distance + pan target, mapped into the renderer's normalized frame. paint_overlay bakes through
+        the identical camera, so strokes land where painted."""
         import numpy as np
         import trimesh
         import torch.nn.functional as F
         from PIL import Image
         from DifferentiableRenderer.MeshRender import get_mv_matrix, transform_pos
+        from DifferentiableRenderer.camera_utils import get_perspective_projection_matrix
 
         pp = self.paint_pipeline
         render = pp.render
@@ -845,7 +899,14 @@ class TextureWorker:
         render.set_texture(np.asarray(tex_img.convert("RGB")).astype(np.float32) / 255.0)
 
         proj = render.camera_proj_mat
-        r_mv = get_mv_matrix(elev=elev, azim=azim, camera_distance=render.camera_distance, center=None)
+        cam_dist, cam_center = render.camera_distance, None
+        if fov is not None:
+            proj = get_perspective_projection_matrix(float(fov), 1.0, 0.01, 100.0)
+        if radius is not None or center is not None:
+            _d, cam_center = _mv_cam_to_render(render, radius, center)
+            if _d is not None:
+                cam_dist = _d
+        r_mv = get_mv_matrix(elev=elev, azim=azim, camera_distance=cam_dist, center=cam_center)
         pos_clip = transform_pos(proj, transform_pos(r_mv, render.vtx_pos, keepdim=True))
         rast_out, _ = render.raster_rasterize(pos_clip, render.pos_idx, resolution=(rs, rs))
         uv, _ = render.raster_interpolate(render.vtx_uv[None, ...], rast_out, render.uv_idx)

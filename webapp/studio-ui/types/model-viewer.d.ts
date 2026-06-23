@@ -11,6 +11,10 @@ export interface ModelViewerVector3D {
 
 export interface ModelViewerElement extends HTMLElement {
   getCameraOrbit(): { theta: number; phi: number; radius: number }
+  // Realtime VERTICAL field of view in degrees, and the orbit pivot (camera target) in model meters.
+  // Captured with the orbit to reproduce the exact perspective view for free-camera hand-paint.
+  getFieldOfView(): number
+  getCameraTarget(): ModelViewerVector3D
   // Raycast from a viewport pixel to the model surface; null when the ray misses.
   positionAndNormalFromPoint(
     pixelX: number,

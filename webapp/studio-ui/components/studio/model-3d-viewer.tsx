@@ -2,7 +2,7 @@
 
 import { Box, Crosshair, Download, Upload } from "lucide-react"
 import { useRef, useState } from "react"
-import { api } from "@/lib/api"
+import { api, type CustomCam } from "@/lib/api"
 import { MARKER_LABELS, type MarkerId, type Model } from "@/lib/types"
 import type { ModelViewerElement } from "@/types/model-viewer"
 import { buttonVariants } from "@/components/ui/button"
@@ -21,7 +21,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
 
   // Custom (free-camera) hand-paint state.
   const [customOpen, setCustomOpen] = useState(false)
-  const [angle, setAngle] = useState<{ elev: number; azim: number } | null>(null)
+  const [angle, setAngle] = useState<{ elev: number; azim: number; cam?: CustomCam } | null>(null)
   const [backdrop, setBackdrop] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
 
@@ -51,13 +51,23 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     // (PROJECTION_CAMS front=0, right=90, back=180, left=270; corners fl=315/fr=45). Using
     // (360 - theta) would reflect right<->left (mirrored render), so use theta directly.
     const azim = ((thetaDeg % 360) + 360) % 360
-    const a = { elev, azim }
+    // Also capture the live PERSPECTIVE framing — vertical fov, orbit radius (zoom) and pan target —
+    // so the backdrop matches what's on screen, not just the angle. Without these the backend falls
+    // back to its orthographic full-object framing ("close but not exact"). The same cam is sent to
+    // the render and the bake so strokes land where painted. Guarded so an older model-viewer that
+    // lacks these getters degrades gracefully to the angle-only (orthographic) path.
+    let cam: CustomCam | undefined
+    if (typeof mv.getFieldOfView === "function" && typeof mv.getCameraTarget === "function") {
+      const t = mv.getCameraTarget()
+      cam = { fov: mv.getFieldOfView(), radius: orbit.radius, target: [t.x, t.y, t.z] }
+    }
+    const a = { elev, azim, cam }
     setAngle(a)
     setBackdrop(null)
     setCustomOpen(true)
     setBusy(true)
     try {
-      await runJob(() => api.renderCustomView(model.id, a.elev, a.azim), "Rendering custom view")
+      await runJob(() => api.renderCustomView(model.id, a.elev, a.azim, a.cam), "Rendering custom view")
       setBackdrop(api.customRenderUrl(model.id, Date.now()))
     } finally {
       setBusy(false)
@@ -102,7 +112,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     if (!model || !angle) return
     setBusy(true)
     try {
-      await runJob(() => api.handpaintCustomView(model.id, angle.elev, angle.azim, overlay), "Hand painting custom view")
+      await runJob(() => api.handpaintCustomView(model.id, angle.elev, angle.azim, overlay, angle.cam), "Hand painting custom view")
       setCustomOpen(false)
       setBackdrop(null)
     } finally {
@@ -115,7 +125,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     if (!model || !angle) return
     setBusy(true)
     try {
-      await runJob(() => api.handpaintAiCustomView(model.id, angle.elev, angle.azim, image), "AI fixing custom view")
+      await runJob(() => api.handpaintAiCustomView(model.id, angle.elev, angle.azim, image, angle.cam), "AI fixing custom view")
       setCustomOpen(false)
       setBackdrop(null)
     } finally {

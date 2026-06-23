@@ -51,6 +51,12 @@ def get_mv_matrix(elev, azim, camera_distance, center=None):
     else:
         center = np.array(center)
 
+    # Orbit the camera AROUND `center` rather than the world origin: the spherical position above is
+    # the camera's offset from the pivot, so translate it by the pivot. center=None -> [0,0,0] keeps
+    # every existing caller (canonical faces, multiview bake) byte-identical; only the free-camera
+    # custom-paint path passes a non-origin center (a panned model-viewer target), which must orbit it.
+    camera_position = camera_position + center
+
     lookat = center - camera_position
     lookat = lookat / np.linalg.norm(lookat)
 

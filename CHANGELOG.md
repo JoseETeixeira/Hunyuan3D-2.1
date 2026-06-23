@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Fixed
+- **Custom hand-paint ("Paint this angle"): the backdrop now matches the live 3D view exactly.** The
+  capture sent only the orbit angle (`elev`/`azim`), but the backend rendered (and baked) with a fixed
+  **orthographic** camera (`ortho_scale=1.2`, fixed distance, origin pivot) while `model-viewer` is
+  **perspective** — so zoom, field of view and pan were dropped and the backdrop framed the whole
+  object ("very close but not exact"). The capture now also reads `getFieldOfView()` (vertical fov),
+  `getCameraOrbit().radius` (zoom) and `getCameraTarget()` (pan), and the backend renders + bakes
+  through a matching **perspective** camera: fov → square perspective projection (= the centre square
+  of the live viewport), radius → camera distance, target → pivot, all mapped into the renderer's
+  normalized frame (`set_mesh` axis remap `R(P)=(-x,z,-y)` then `(P−C)·s`). The render and bake share
+  the camera so strokes still land where painted. Scoped strictly to the `custom` path: the 10 canonical
+  face renders/bakes pass none of the new params and stay orthographic/byte-identical. `get_mv_matrix`
+  now orbits its `center` arg (a no-op for the `center=None` every existing caller passes).
+  `webapp/studio-ui/components/studio/model-3d-viewer.tsx`, `lib/api.ts`, `types/model-viewer.d.ts`,
+  `webapp/studio.py`, `webapp/pipeline.py`, `hy3dpaint/DifferentiableRenderer/camera_utils.py`.
+- **Hand paint / AI fix: grazing (near edge-on) surfaces now bake.** Strokes on steeply-angled but
+  clearly-visible faces — e.g. a car's rear quarter at a 3/4 custom camera — silently failed to bake:
+  `back_project`'s cosine gate (`bake_angle_thres=75°`) zeros any texel whose normal sits >75° off the
+  camera. Since the user paints directly on the render, every rasterized pixel should be paintable, so
+  `pipeline.py:paint_overlay` now widens the gate for the overlay bake (default 85°, env
+  `PAINT_OVERLAY_ANGLE_THRES`, restored after — `render` is the shared pipeline renderer). `webapp/pipeline.py`.
+
 ### Added
 - **Hand paint — "AI fix" a captured view with Gemini.** The hand-paint surface gets an **AI fix**
   button: it flattens the captured face render plus any strokes and sends it to Gemini with a prompt
