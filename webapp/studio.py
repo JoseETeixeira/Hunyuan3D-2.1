@@ -1615,10 +1615,14 @@ def download_model(mid: str, fmt: str):
         src = _shape_glb(mid)
     if not src.exists():
         raise HTTPException(status_code=404, detail="No model to download")
+    no_store = {"Cache-Control": "no-store"}
     if fmt == "glb":
-        return FileResponse(src, media_type="model/gltf-binary", filename=f"{mid}.glb")
+        return FileResponse(src, media_type="model/gltf-binary", filename=f"{mid}.glb", headers=no_store)
+    # Re-convert when the cached fbx/blend is missing OR older than the source GLB. The source keeps a
+    # stable stem ({mid}_shape/_textured/_rigged) across re-imports + retextures, so a stale sibling
+    # would otherwise be served forever after the GLB it derives from changes.
     out = OUTPUT_DIR / f"{src.stem}.{fmt}"
-    if not out.exists():
+    if not out.exists() or out.stat().st_mtime < src.stat().st_mtime:
         from webapp import server
         server._blender_convert(str(src), str(out))
-    return FileResponse(out, media_type="application/octet-stream", filename=f"{mid}.{fmt}")
+    return FileResponse(out, media_type="application/octet-stream", filename=f"{mid}.{fmt}", headers=no_store)

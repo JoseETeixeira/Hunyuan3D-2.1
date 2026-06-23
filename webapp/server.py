@@ -1006,13 +1006,16 @@ def download(job_id: str, fmt: str):
     if not src.exists():
         raise HTTPException(status_code=404, detail="No model for this job")
 
+    no_store = {"Cache-Control": "no-store"}
     if fmt == "glb":
-        return FileResponse(src, media_type="model/gltf-binary", filename=f"{job_id}.glb")
+        return FileResponse(src, media_type="model/gltf-binary", filename=f"{job_id}.glb", headers=no_store)
 
+    # Re-convert when the cached sibling is missing OR older than the source GLB; the source stem is
+    # stable across re-textures, so a stale {id}_textured.fbx would otherwise be served forever.
     out = OUTPUT_DIR / f"{src.stem}.{fmt}"  # cached, e.g. {id}_textured.fbx
-    if not out.exists():
+    if not out.exists() or out.stat().st_mtime < src.stat().st_mtime:
         _blender_convert(str(src), str(out))
-    return FileResponse(out, media_type="application/octet-stream", filename=f"{job_id}.{fmt}")
+    return FileResponse(out, media_type="application/octet-stream", filename=f"{job_id}.{fmt}", headers=no_store)
 
 
 @app.get("/api/gallery")
