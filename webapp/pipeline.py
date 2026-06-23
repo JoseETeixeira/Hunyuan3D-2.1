@@ -202,6 +202,18 @@ def _extract_base_texture(mesh, glb_path):
     return None
 
 
+def _aspect_resolution(rs, aspect):
+    """Pixel (width, height) for a render whose aspect width/height ≈ `aspect`, with the LONGER side
+    bounded to `rs`. `aspect` None or <=0 -> square (rs, rs). Used so a free-camera backdrop matches
+    the live model-viewer's (often non-square) viewport instead of a forced square."""
+    if not aspect or float(aspect) <= 0:
+        return int(rs), int(rs)
+    a = float(aspect)
+    if a >= 1.0:
+        return int(rs), max(1, int(round(rs / a)))
+    return max(1, int(round(rs * a))), int(rs)
+
+
 def _mv_cam_to_render(render, radius=None, center=None):
     """Map a model-viewer camera (GLB-space orbit radius + pan target) into the renderer's normalized
     frame. set_mesh remaps GLB axes as R(P)=(-x, z, -y) then normalizes (P - C)*s (C/s are the stored
@@ -769,7 +781,7 @@ class TextureWorker:
 
     @torch.inference_mode()
     def paint_overlay(self, uid: str, textured_glb_path: str, elev: float, azim: float, overlay,
-                      fov=None, radius=None, center=None):
+                      fov=None, radius=None, center=None, aspect=None):
         """Bake a HAND-PAINTED overlay straight onto an already-textured mesh at the (elev, azim) face
         camera. `overlay` is a PIL RGBA already aligned to that camera's render (the user painted ON the
         face render), its alpha marking the strokes. No rembg / silhouette-fit — the strokes are
@@ -795,7 +807,15 @@ class TextureWorker:
         render.set_texture(tex_img.convert("RGB"))
         base = torch.from_numpy(render.get_texture()).float().to(render.device)
 
-        ov = np.asarray(overlay.convert("RGBA").resize((rs, rs))).astype(np.float32) / 255.0
+        # Match the render's resolution/aspect so the painted overlay back-projects pixel-aligned. For
+        # a perspective free-camera the overlay is the viewport-aspect backdrop the user drew on; for
+        # the default face camera it stays square (rs x rs) exactly as before.
+        out_w = out_h = rs
+        proj_persp = None
+        if fov is not None:
+            out_w, out_h = _aspect_resolution(rs, aspect)
+            proj_persp = get_perspective_projection_matrix(float(fov), out_w / out_h, 0.01, 100.0)
+        ov = np.asarray(overlay.convert("RGBA").resize((out_w, out_h))).astype(np.float32) / 255.0
         ov[..., 3] = (ov[..., 3] > 0.5).astype(np.float32)  # bake only the painted strokes
         # Free-camera bake: map model-viewer's orbit distance/pan target into the renderer frame, and
         # swap the shared ortho projection for a perspective one (restored below) so the bake camera
@@ -810,10 +830,18 @@ class TextureWorker:
         _saved_thres = render.bake_angle_thres
         render.bake_angle_thres = max(_saved_thres, float(os.environ.get("PAINT_OVERLAY_ANGLE_THRES", "85")))
         _saved_proj = render.camera_proj_mat
-        if fov is not None:
-            render.camera_proj_mat = get_perspective_projection_matrix(float(fov), 1.0, 0.01, 100.0)
+        # back_project's default "back_sample" mode reconstructs the texel->screen projection assuming
+        # an ORTHOGRAPHIC camera (it drops the perspective w=-z divide, see MeshRender.back_project),
+        # so it misaligns badly under our perspective camera and bakes almost nothing. For the
+        # perspective free-camera path use "linear", which scatters from the perspective-correct
+        # rasterized uv; the orthographic face camera keeps the default back_sample.
+        bake_method = None
+        if proj_persp is not None:
+            render.camera_proj_mat = proj_persp
+            bake_method = "linear"
         try:
-            new_tex, cos_map, _ = render.back_project(ov, elev, azim, camera_distance=cam_dist, center=cam_center)
+            new_tex, cos_map, _ = render.back_project(ov, elev, azim, camera_distance=cam_dist,
+                                                      center=cam_center, method=bake_method)
         finally:
             render.bake_angle_thres = _saved_thres
             render.camera_proj_mat = _saved_proj
@@ -867,7 +895,7 @@ class TextureWorker:
 
     @torch.inference_mode()
     def render_textured_view(self, textured_glb_path: str, elev: float, azim: float,
-                             fov=None, radius=None, center=None):
+                             fov=None, radius=None, center=None, aspect=None):
         """Forward-render the ALREADY-textured mesh at one camera: EXACT geometry + the existing baked
         colours, white background. This is the geometry-locked canvas reface restyles toward the
         references. Because it is a COMPLETE colour render (not a grey geom), the image model keeps ITS
@@ -900,15 +928,19 @@ class TextureWorker:
 
         proj = render.camera_proj_mat
         cam_dist, cam_center = render.camera_distance, None
+        out_w = out_h = rs
         if fov is not None:
-            proj = get_perspective_projection_matrix(float(fov), 1.0, 0.01, 100.0)
+            # Perspective free-camera: match model-viewer's vertical fov AND its (non-square) viewport
+            # aspect, so the backdrop is the same view — not a square centre-crop of it.
+            out_w, out_h = _aspect_resolution(rs, aspect)
+            proj = get_perspective_projection_matrix(float(fov), out_w / out_h, 0.01, 100.0)
         if radius is not None or center is not None:
             _d, cam_center = _mv_cam_to_render(render, radius, center)
             if _d is not None:
                 cam_dist = _d
         r_mv = get_mv_matrix(elev=elev, azim=azim, camera_distance=cam_dist, center=cam_center)
         pos_clip = transform_pos(proj, transform_pos(r_mv, render.vtx_pos, keepdim=True))
-        rast_out, _ = render.raster_rasterize(pos_clip, render.pos_idx, resolution=(rs, rs))
+        rast_out, _ = render.raster_rasterize(pos_clip, render.pos_idx, resolution=(out_h, out_w))
         uv, _ = render.raster_interpolate(render.vtx_uv[None, ...], rast_out, render.uv_idx)
         vis = torch.clamp(rast_out[..., -1:], 0, 1)[0]
         tex = render.tex.to(render.device).float()

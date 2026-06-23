@@ -9,14 +9,18 @@
   **perspective** — so zoom, field of view and pan were dropped and the backdrop framed the whole
   object ("very close but not exact"). The capture now also reads `getFieldOfView()` (vertical fov),
   `getCameraOrbit().radius` (zoom) and `getCameraTarget()` (pan), and the backend renders + bakes
-  through a matching **perspective** camera: fov → square perspective projection (= the centre square
-  of the live viewport), radius → camera distance, target → pivot, all mapped into the renderer's
-  normalized frame (`set_mesh` axis remap `R(P)=(-x,z,-y)` then `(P−C)·s`). The render and bake share
-  the camera so strokes still land where painted. Scoped strictly to the `custom` path: the 10 canonical
-  face renders/bakes pass none of the new params and stay orthographic/byte-identical. `get_mv_matrix`
-  now orbits its `center` arg (a no-op for the `center=None` every existing caller passes).
-  `webapp/studio-ui/components/studio/model-3d-viewer.tsx`, `lib/api.ts`, `types/model-viewer.d.ts`,
-  `webapp/studio.py`, `webapp/pipeline.py`, `hy3dpaint/DifferentiableRenderer/camera_utils.py`.
+  through a matching **perspective** camera: fov → vertical perspective fov, radius → camera distance,
+  target → pivot, and the live viewport **aspect ratio** → the backdrop's aspect (so a wide 3D viewer
+  renders a wide backdrop, not a square centre-crop — the original square render only reproduced the
+  narrow centre of a wide view, which read as a flatter/zoomed angle). radius/target are mapped into the
+  renderer's normalized frame (`set_mesh` axis remap `R(P)=(-x,z,-y)` then `(P−C)·s`); the backdrop +
+  paint canvas + bake all follow the captured aspect. The render and bake share the camera so strokes
+  land where painted. Scoped strictly to the `custom` path: the 10 canonical face renders/bakes pass
+  none of the new params and stay square/orthographic/byte-identical. `get_mv_matrix` now orbits its
+  `center` arg (a no-op for the `center=None` every existing caller passes).
+  `webapp/studio-ui/components/studio/model-3d-viewer.tsx`, `hand-paint-canvas.tsx`, `lib/api.ts`,
+  `types/model-viewer.d.ts`, `webapp/studio.py`, `webapp/pipeline.py`,
+  `hy3dpaint/DifferentiableRenderer/camera_utils.py`.
 - **Hand paint / AI fix: grazing (near edge-on) surfaces now bake.** Strokes on steeply-angled but
   clearly-visible faces — e.g. a car's rear quarter at a 3/4 custom camera — silently failed to bake:
   `back_project`'s cosine gate (`bake_angle_thres=75°`) zeros any texel whose normal sits >75° off the
@@ -25,6 +29,14 @@
   `PAINT_OVERLAY_ANGLE_THRES`, restored after — `render` is the shared pipeline renderer). `webapp/pipeline.py`.
 
 ### Added
+- **AI fix on a custom view now anchors to the closest canonical face's reference.** Previously AI fix
+  only passed a style reference for the 10 canonical faces; a free-camera ("Paint this angle") view had
+  none, so Gemini had nothing telling it what the face *should* look like. It now picks the canonical
+  view whose camera direction is nearest the custom (elev, azim) (`_closest_canonical_view`) and passes
+  that view's approved reference as a look-only anchor (letterboxed to the output aspect via `_contain`
+  so a square reference isn't stretched into a wide frame). The existing prompt already uses references
+  only to resolve garbled areas and keep colours/identity — it never changes the captured image's view,
+  framing or aspect. `webapp/studio.py`.
 - **Hand paint — "AI fix" a captured view with Gemini.** The hand-paint surface gets an **AI fix**
   button: it flattens the captured face render plus any strokes and sends it to Gemini with a prompt
   that keeps the existing style + base colours and repairs only inconsistencies (seams, projection

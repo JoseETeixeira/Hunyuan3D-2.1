@@ -59,7 +59,11 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     let cam: CustomCam | undefined
     if (typeof mv.getFieldOfView === "function" && typeof mv.getCameraTarget === "function") {
       const t = mv.getCameraTarget()
-      cam = { fov: mv.getFieldOfView(), radius: orbit.radius, target: [t.x, t.y, t.z] }
+      // Capture the viewport aspect too: model-viewer's fov is VERTICAL, so a wide viewer shows a wide
+      // (large horizontal-fov) view. Rendering the backdrop at this aspect reproduces it exactly
+      // instead of a square centre-crop. Guard against a zero-height read.
+      const aspect = mv.clientHeight > 0 ? mv.clientWidth / mv.clientHeight : 1
+      cam = { fov: mv.getFieldOfView(), radius: orbit.radius, target: [t.x, t.y, t.z], aspect }
     }
     const a = { elev, azim, cam }
     setAngle(a)
@@ -222,11 +226,19 @@ export function Model3DViewer({ model }: { model: Model | null }) {
 
       <div className="relative flex-1 overflow-hidden rounded-xl border border-border bg-[radial-gradient(circle_at_50%_30%,oklch(0.24_0.03_240),oklch(0.15_0.02_250))]">
         {src ? (
+          // Lock the field of view to a constant. model-viewer's default "auto" fov keeps re-framing
+          // as you orbit (and its default zoom changes fov + radius under damping), so the fov captured
+          // for "Paint this angle" was a moving, mid-animation value that didn't match the settled view
+          // — making the backdrop more zoomed than the live camera. With fov fixed, zoom becomes a pure
+          // radius dolly and the captured fov always equals what's on screen, so the backdrop matches.
           <model-viewer
             ref={mvRef}
             src={src}
             alt={`3D model: ${model?.name ?? ""}`}
             camera-controls
+            field-of-view="30deg"
+            min-field-of-view="30deg"
+            max-field-of-view="30deg"
             shadow-intensity="1"
             exposure="1.1"
             environment-image="neutral"

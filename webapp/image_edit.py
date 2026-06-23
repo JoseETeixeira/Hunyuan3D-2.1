@@ -52,6 +52,21 @@ HANDPAINT_FIX_PROMPT = (
 )
 
 
+# Extra rule for the FREE-CAMERA (custom) hand-paint AI fix, where the reference is the nearest
+# canonical face — a DIFFERENT camera angle of the same object. Without this, Gemini tends to redraw
+# the captured view toward the reference's viewpoint at angles far from any canonical face.
+HANDPAINT_CUSTOM_REF_RULE = (
+    "IMPORTANT — the reference image is a DIFFERENT camera angle of the SAME object, supplied ONLY as a "
+    "colour and material guide. Image 1 is the ABSOLUTE source of truth for the camera angle, "
+    "composition, framing, proportions, geometry, silhouette and which surfaces are visible. Do NOT "
+    "adopt the reference's viewpoint, layout, framing or proportions; do NOT rotate, re-perspective, "
+    "re-frame or otherwise redraw Image 1's shapes toward the reference; do NOT add, remove or move any "
+    "object to match it. Reproduce Image 1's exact structure and layout pixel-for-pixel, changing only "
+    "local colour/texture to repair garbled spots. If the reference and Image 1 disagree on shape, "
+    "position, scale or angle, Image 1 ALWAYS wins."
+)
+
+
 def _png_buf(img, name, size, mode="RGB"):
     b = io.BytesIO()
     img.convert(mode).resize(size).save(b, format="PNG")

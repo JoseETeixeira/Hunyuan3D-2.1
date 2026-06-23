@@ -44,7 +44,9 @@ export function HandPaintCanvas({
   const [color, setColor] = useState("#ffffff")
   const [size, setSize] = useState(14)
   const [erase, setErase] = useState(false)
-  const [dim, setDim] = useState(640)
+  // Drawing-buffer size. Matches the backdrop's aspect (a free-camera backdrop can be non-square, e.g.
+  // a wide 3D viewport) with the longer side clamped to [384, 1024] so strokes bake where painted.
+  const [dims, setDims] = useState({ w: 640, h: 640 })
   const [dirty, setDirty] = useState(false)
   const [zoom, setZoom] = useState(1)
   const [pan, setPan] = useState({ x: 0, y: 0 })
@@ -56,11 +58,18 @@ export function HandPaintCanvas({
   const panRef = useRef(pan)
   panRef.current = pan
 
-  // Match the drawing buffer to the (square) backdrop render so strokes bake exactly where painted.
+  // Match the drawing buffer to the backdrop render (any aspect) so strokes bake exactly where
+  // painted. The longer side is clamped to [384, 1024]; the other follows the backdrop's aspect.
   useEffect(() => {
     if (!backdropUrl) return
     const img = new Image()
-    img.onload = () => setDim(Math.max(384, Math.min(1024, img.naturalWidth || 640)))
+    img.onload = () => {
+      const nw = img.naturalWidth || 640
+      const nh = img.naturalHeight || 640
+      const long = Math.max(nw, nh)
+      const scale = Math.max(384, Math.min(1024, long)) / long
+      setDims({ w: Math.max(1, Math.round(nw * scale)), h: Math.max(1, Math.round(nh * scale)) })
+    }
     img.src = backdropUrl
     // A fresh backdrop resets the view (zoom/pan back to fit) and the undo history.
     setZoom(1)
@@ -263,15 +272,15 @@ export function HandPaintCanvas({
         img.src = backdropUrl
       })
       const off = document.createElement("canvas")
-      off.width = dim
-      off.height = dim
+      off.width = dims.w
+      off.height = dims.h
       const ctx = off.getContext("2d")
       if (!ctx) return
-      // backdrop is square → contain-fit equals a full fill; strokes overlay on top.
-      const s = Math.min(dim / img.naturalWidth, dim / img.naturalHeight)
+      // The buffer matches the backdrop aspect → contain-fit equals a full fill; strokes overlay on top.
+      const s = Math.min(dims.w / img.naturalWidth, dims.h / img.naturalHeight)
       const w = img.naturalWidth * s
       const h = img.naturalHeight * s
-      ctx.drawImage(img, (dim - w) / 2, (dim - h) / 2, w, h)
+      ctx.drawImage(img, (dims.w - w) / 2, (dims.h - h) / 2, w, h)
       if (canvasRef.current) ctx.drawImage(canvasRef.current, 0, 0)
       off.toBlob((b) => b && onGeminiFix(b), "image/png")
     } catch {
@@ -288,14 +297,14 @@ export function HandPaintCanvas({
     const img = new Image()
     img.onload = () => {
       const off = document.createElement("canvas")
-      off.width = dim
-      off.height = dim
+      off.width = dims.w
+      off.height = dims.h
       const ctx = off.getContext("2d")
       if (ctx) {
-        const s = Math.min(dim / img.naturalWidth, dim / img.naturalHeight)
+        const s = Math.min(dims.w / img.naturalWidth, dims.h / img.naturalHeight)
         const w = img.naturalWidth * s
         const h = img.naturalHeight * s
-        ctx.drawImage(img, (dim - w) / 2, (dim - h) / 2, w, h)
+        ctx.drawImage(img, (dims.w - w) / 2, (dims.h - h) / 2, w, h)
         off.toBlob((b) => b && onApply(b), "image/png")
       }
       URL.revokeObjectURL(img.src)
@@ -312,7 +321,8 @@ export function HandPaintCanvas({
     <div className="flex w-full flex-col items-center gap-3">
       <div
         ref={viewportRef}
-        className="relative aspect-square w-full max-w-[560px] overflow-hidden rounded-lg border border-border bg-background"
+        className="relative w-full max-w-[560px] overflow-hidden rounded-lg border border-border bg-background"
+        style={{ aspectRatio: `${dims.w} / ${dims.h}` }}
       >
         {backdropUrl ? (
           <div
@@ -323,8 +333,8 @@ export function HandPaintCanvas({
             <img src={backdropUrl} alt="current face" className="pointer-events-none absolute inset-0 size-full object-contain" />
             <canvas
               ref={canvasRef}
-              width={dim}
-              height={dim}
+              width={dims.w}
+              height={dims.h}
               onPointerDown={down}
               onPointerMove={move}
               onPointerUp={up}
@@ -334,8 +344,8 @@ export function HandPaintCanvas({
             />
             <canvas
               ref={cursorRef}
-              width={dim}
-              height={dim}
+              width={dims.w}
+              height={dims.h}
               className="pointer-events-none absolute inset-0 size-full"
             />
           </div>
