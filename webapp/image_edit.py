@@ -35,6 +35,22 @@ CONSISTENCY_RULE = (
     "or swap which side faces which way."
 )
 
+# Hand-paint "AI fix": Image 1 is a render of ONE face of the model's CURRENT texture. Clean it up
+# WITHOUT restyling — keep the exact palette, base colours, composition and framing, repair only the
+# local artefacts a projected texture leaves behind. Pair with CONSISTENCY_RULE + CARTOON_STYLE and,
+# optionally, the user's own touch-up note. Prefer Gemini so the layout/proportions stay locked.
+HANDPAINT_FIX_PROMPT = (
+    "Image 1 is a render of ONE face of a 3D model's CURRENT texture. Clean it up WITHOUT restyling "
+    "it. Keep the exact same composition, framing, proportions, subject, palette and BASE COLOURS as "
+    "Image 1 — do not recolour, relight, restyle or redraw anything. Only repair local texture "
+    "inconsistencies: visible seams, projection smears, stretched or blurry patches, duplicated or "
+    "ghosted detail, colour bleeding across edges, and small artefacts. Where a region is garbled, "
+    "reconstruct it to match the colours and the style already present in Image 1. Any additional "
+    "reference images show the intended clean look for this view — use them ONLY to resolve "
+    "ambiguous or garbled areas, never to change Image 1's colours. Output the same view at the same "
+    "scale."
+)
+
 
 def _png_buf(img, name, size, mode="RGB"):
     b = io.BytesIO()

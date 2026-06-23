@@ -517,6 +517,11 @@ function FaceTile({ model, view, base = false }: { model: Model; view: ViewId; b
     setOpen(false)
     setBackdrop(null)
   }
+  async function applyGeminiFix(image: Blob) {
+    await runJob(() => api.handpaintAiFace(model.id, view, image), `AI fixing ${VIEW_LABELS[view]}`)
+    setOpen(false)
+    setBackdrop(null)
+  }
   useEffect(() => {
     if (open && method === "handpaint" && !backdrop && !rendering) prepareCanvas()
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -619,7 +624,7 @@ function FaceTile({ model, view, base = false }: { model: Model; view: ViewId; b
         imageAlt={`${VIEW_LABELS[view]} reference`}
         imageSlot={
           method === "handpaint" ? (
-            <HandPaintCanvas backdropUrl={backdrop} refUrl={ref.url} onApply={applyHandpaint} busy={busy || rendering} downloadName={`handpaint-${view}`} />
+            <HandPaintCanvas backdropUrl={backdrop} refUrl={ref.url} onApply={applyHandpaint} onGeminiFix={applyGeminiFix} busy={busy || rendering} downloadName={`handpaint-${view}`} />
           ) : undefined
         }
         badge={

@@ -1,6 +1,6 @@
 "use client"
 
-import { Check, Download, Eraser, Hand, Loader2, RotateCcw, Trash2, Upload } from "lucide-react"
+import { Check, Download, Eraser, Hand, Loader2, RotateCcw, Sparkles, Trash2, Upload } from "lucide-react"
 import { useEffect, useRef, useState } from "react"
 import { Button } from "@/components/ui/button"
 import { Slider } from "@/components/ui/slider"
@@ -13,16 +13,21 @@ const MAX_UNDO = 30
 // RGBA overlay (transparent except the strokes) that the backend bakes straight onto that face. The
 // user can also download that backdrop, upload an externally-edited image (baked immediately via the
 // same overlay path), and zoom/pan the surface for fine detail.
+// "AI fix" (when onGeminiFix is provided) flattens the backdrop + any strokes and hands the captured
+// view to Gemini, which keeps the style + base colours and repairs only inconsistencies; the cleaned
+// image is baked through the same overlay path.
 export function HandPaintCanvas({
   backdropUrl,
   refUrl,
   onApply,
+  onGeminiFix,
   busy,
   downloadName = "handpaint",
 }: {
   backdropUrl: string | null
   refUrl: string | null
   onApply: (overlay: Blob) => void
+  onGeminiFix?: (image: Blob) => void
   busy: boolean
   downloadName?: string
 }) {
@@ -245,6 +250,35 @@ export function HandPaintCanvas({
     }
   }
 
+  // AI fix: flatten the backdrop + any strokes into the square buffer and hand it to Gemini (keeps
+  // style + base colours, fixes only inconsistencies). The flattened capture bakes via the same path.
+  async function geminiFix() {
+    if (!backdropUrl || !onGeminiFix) return
+    try {
+      const img = new Image()
+      img.crossOrigin = "anonymous"
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve()
+        img.onerror = () => reject(new Error("backdrop load failed"))
+        img.src = backdropUrl
+      })
+      const off = document.createElement("canvas")
+      off.width = dim
+      off.height = dim
+      const ctx = off.getContext("2d")
+      if (!ctx) return
+      // backdrop is square → contain-fit equals a full fill; strokes overlay on top.
+      const s = Math.min(dim / img.naturalWidth, dim / img.naturalHeight)
+      const w = img.naturalWidth * s
+      const h = img.naturalHeight * s
+      ctx.drawImage(img, (dim - w) / 2, (dim - h) / 2, w, h)
+      if (canvasRef.current) ctx.drawImage(canvasRef.current, 0, 0)
+      off.toBlob((b) => b && onGeminiFix(b), "image/png")
+    } catch {
+      /* ignore — best-effort; the user can retry */
+    }
+  }
+
   // Upload an image and bake it straight onto the face: contain-fit into the square overlay buffer
   // (no distortion; a downloaded backdrop re-registers 1:1) and reuse the existing overlay bake.
   function onUploadChange(e: React.ChangeEvent<HTMLInputElement>) {
@@ -324,6 +358,18 @@ export function HandPaintCanvas({
             <Download className="size-3" />
             Download
           </Button>
+          {onGeminiFix && (
+            <Button
+              size="xs"
+              variant="secondary"
+              onClick={geminiFix}
+              disabled={busy || !backdropUrl}
+              title="AI fix with Gemini: keep the style + base colours, repair only inconsistencies (uses your strokes as hints)"
+            >
+              {busy ? <Loader2 className="size-3 animate-spin" /> : <Sparkles className="size-3" />}
+              AI fix
+            </Button>
+          )}
           <Button
             size="xs"
             variant={panMode ? "default" : "secondary"}

@@ -110,6 +110,19 @@ export function Model3DViewer({ model }: { model: Model | null }) {
     }
   }
 
+  // AI fix the captured custom view with Gemini (keep style + base colours, fix only inconsistencies).
+  async function applyGeminiFixCustom(image: Blob) {
+    if (!model || !angle) return
+    setBusy(true)
+    try {
+      await runJob(() => api.handpaintAiCustomView(model.id, angle.elev, angle.azim, image), "AI fixing custom view")
+      setCustomOpen(false)
+      setBackdrop(null)
+    } finally {
+      setBusy(false)
+    }
+  }
+
   return (
     <div className="flex h-full flex-col gap-3">
       <div className="flex flex-col gap-2">
@@ -276,6 +289,7 @@ export function Model3DViewer({ model }: { model: Model | null }) {
             backdropUrl={backdrop}
             refUrl={backdrop}
             onApply={applyCustom}
+            onGeminiFix={applyGeminiFixCustom}
             busy={busy}
             downloadName="handpaint-custom"
           />

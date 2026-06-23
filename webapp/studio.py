@@ -582,6 +582,9 @@ def run_gpu_job(kind: str, sjid: str) -> None:
             _gpu_face_render(sjid, mid, j["_view"], j.get("_elev"), j.get("_azim"))
         elif kind == "studio_handpaint":
             _gpu_handpaint(sjid, mid, j["_view"], j.get("_image"), j.get("_elev"), j.get("_azim"))
+        elif kind == "studio_handpaint_ai":
+            _gpu_handpaint_ai(sjid, mid, j["_view"], j.get("_image"), j.get("_edit"),
+                              j.get("_elev"), j.get("_azim"))
         complete_job(sjid, mid)
     except Exception as e:  # noqa: BLE001
         import traceback
@@ -934,6 +937,55 @@ def _gpu_handpaint(sjid: str, mid: str, view: str, overlay_path: str, elev=None,
     data["textureStage"] = "complete"
     _save(mid, data)
     label = f"Hand paint custom ({int(round(elev))}°/{int(round(azim))}°)" if view == "custom" else f"Hand paint {view}"
+    _push_snapshot(mid, label)
+    try:  # face changed -> drop the stale backdrop so the next open re-renders
+        _facerender_file(mid, view).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def _gpu_handpaint_ai(sjid: str, mid: str, view: str, image_path: str, edit,
+                      elev=None, azim=None) -> None:
+    """Gemini-clean a CAPTURED face view (the hand-paint backdrop, optionally with the user's rough
+    strokes flattened in), keeping its style + base colours and fixing only local inconsistencies,
+    then bake the cleaned image onto the mesh at the face camera via the overlay path. A full-opaque
+    result repaints the whole *visible* face (same as the upload bake). view="custom" uses the
+    supplied (elev, azim) and touches no face slot."""
+    from webapp import server
+    from webapp.image_edit import CARTOON_STYLE, CONSISTENCY_RULE, HANDPAINT_FIX_PROMPT, edit_image
+    if not _textured_glb(mid).exists():
+        raise RuntimeError("model has no textured mesh")
+    if not (image_path and os.path.exists(image_path)):
+        raise RuntimeError("no captured view provided")
+    if view == "custom":
+        elev, azim = float(elev), float(azim)
+    else:
+        elev, azim = _cam_for(VIEW_TO_TAG[view])
+
+    set_job(sjid, status="processing", progress=25)
+    captured = Image.open(image_path).convert("RGB")
+    # Style anchor: the view's reference (canonical faces only), used ONLY to resolve garbled areas.
+    images = [captured]
+    if view != "custom":
+        ref = _ref_file(mid, view)
+        if ref and os.path.exists(ref):
+            images.append(Image.open(ref).convert("RGB"))
+    prompt = f"{HANDPAINT_FIX_PROMPT} {CONSISTENCY_RULE} {CARTOON_STYLE}"
+    if edit and edit.strip():
+        prompt += f" Also apply this specific touch-up while keeping everything else: {edit.strip()}."
+    # prefer="gemini": keeps the input's exact proportions/layout so the bake stays aligned.
+    fixed = edit_image(images, prompt, size=(1024, 1024), prefer="gemini").convert("RGB")
+
+    set_job(sjid, status="processing", progress=70)
+    worker = server._ensure_model()
+    worker.paint_overlay(uid=mid, textured_glb_path=str(_textured_glb(mid)), elev=elev, azim=azim,
+                         overlay=fixed.convert("RGBA"))
+    data = _load(mid)
+    if view != "custom":
+        data["faces"][view] = {"status": "done", "mode": "paint"}
+    data["textureStage"] = "complete"
+    _save(mid, data)
+    label = f"AI fix custom ({int(round(elev))}°/{int(round(azim))}°)" if view == "custom" else f"AI fix {view}"
     _push_snapshot(mid, label)
     try:  # face changed -> drop the stale backdrop so the next open re-renders
         _facerender_file(mid, view).unlink()
@@ -1414,6 +1466,31 @@ async def handpaint_face(mid: str, view: str, overlay: UploadFile = File(...),
         data["faces"][view]["status"] = "texturing"
         _save(mid, data)
     submit_gpu("studio_handpaint", sjid)
+    return public_job(sjid)
+
+
+@router.post("/api/models/{mid}/faces/{view}/handpaint-ai")
+async def handpaint_ai_face(mid: str, view: str, image: UploadFile = File(...),
+                            edit_prompt: str | None = Form(None),
+                            elev: float | None = Form(None), azim: float | None = Form(None)):
+    """Gemini-clean a captured view (keep style + base colours, fix only inconsistencies) and bake it
+    onto this face. Multipart `image` is the captured face render (backdrop, optionally with the
+    user's flattened strokes). For view="custom" pass elev+azim to bake at an arbitrary camera. → Job"""
+    _vid(mid); _vview_any(view)
+    if not _textured_glb(mid).exists():
+        raise HTTPException(status_code=400, detail="Run base texturing first")
+    image_path = str(_model_dir(mid) / f"handpaint_ai_{view}.png")
+    _save_upload_png(await image.read(), Path(image_path))
+    sjid = new_job(f"AI fixing {view}", mid)
+    if view == "custom":
+        e, a = _vangles(elev, azim)
+        set_job(sjid, _view=view, _image=image_path, _edit=(edit_prompt or None), _elev=e, _azim=a)
+    else:
+        set_job(sjid, _view=view, _image=image_path, _edit=(edit_prompt or None))
+        data = _load(mid)
+        data["faces"][view]["status"] = "texturing"
+        _save(mid, data)
+    submit_gpu("studio_handpaint_ai", sjid)
     return public_job(sjid)
 
 
