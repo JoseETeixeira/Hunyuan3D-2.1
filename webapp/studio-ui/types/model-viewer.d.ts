@@ -38,6 +38,7 @@ declare module "react" {
         "rotation-per-second"?: string
         "interaction-prompt"?: string
         "disable-zoom"?: boolean
+        "disable-pan"?: boolean
         "field-of-view"?: string
         "min-field-of-view"?: string
         "max-field-of-view"?: string

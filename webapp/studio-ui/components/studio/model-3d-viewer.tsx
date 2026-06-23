@@ -236,6 +236,10 @@ export function Model3DViewer({ model }: { model: Model | null }) {
             src={src}
             alt={`3D model: ${model?.name ?? ""}`}
             camera-controls
+            // Pan is disabled: model-viewer damps + resets the orbit after a pan, so a panned camera is
+            // often captured mid-animation and the hand-paint backdrop wouldn't match. Orbit + zoom
+            // alone is always settled and reproduces exactly; you still reach any part by orbiting.
+            disable-pan
             field-of-view="30deg"
             min-field-of-view="30deg"
             max-field-of-view="30deg"
