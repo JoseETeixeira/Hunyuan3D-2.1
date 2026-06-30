@@ -90,6 +90,11 @@ def _composite_paint_over_base(render, base_img, new_tex, fg_uv, obj_path, glb_p
 
     out = base.copy()
     out[mask] = painted[mask]
+    # Re-pad the UV-island gutters so seam lines don't show. The full base bake runs uv_inpaint; the
+    # old whole-atlas resample also widened that margin incidentally (while softening everything). Now
+    # that the atlas is kept sharp, the thin gutter between islands gets sampled at triangle edges as
+    # dark "vertex lines". Re-pad explicitly: fill only the gutter texels, keep island texels exact.
+    out = _dilate_uv_gutters(render, out)
     # force_set -> store as-is (no resize); downsample=False -> keep the native size on export.
     render.set_texture(out, force_set=True)
     render.save_mesh(obj_path, downsample=False)
@@ -97,6 +102,32 @@ def _composite_paint_over_base(render, base_img, new_tex, fg_uv, obj_path, glb_p
     _force_matte(mesh_out)
     mesh_out.export(glb_path)
     return glb_path
+
+
+def _dilate_uv_gutters(render, tex):
+    """Edge-pad the UV islands: fill the between-island gutter texels from their valid neighbours so
+    bilinear/mipmap sampling at triangle edges never bleeds dark seam lines into the render. Island
+    texels stay bit-exact (re-asserted after the inpaint), so this only ADDS margin — it can't soften
+    the painted/untouched surface. Best-effort: any failure leaves the composite unchanged.
+
+    `render.texture_indices` is the UV rasterization built at load_mesh time: texels inside a UV
+    triangle hold an index >= 0, gutter texels hold -1. `uv_inpaint` fills mask==0 (gutter) from the
+    mask==1 (island) texels via mesh-connectivity + Navier-Stokes.
+    """
+    import cv2
+    import numpy as np
+    try:
+        cov = (render.texture_indices >= 0).detach().cpu().numpy().astype(np.uint8) * 255  # 255=island
+        h, w = tex.shape[:2]
+        if cov.shape != (h, w):                       # texture_indices is at the renderer's texture_size
+            cov = cv2.resize(cov, (w, h), interpolation=cv2.INTER_NEAREST)
+        filled = render.uv_inpaint(tex, cov).astype(np.float32) / 255.0   # uint8 -> [0, 1]
+        keep = cov > 0
+        filled[keep] = tex[keep]                      # island texels stay pixel-exact; only gutters padded
+        return filled
+    except Exception as e:  # noqa: BLE001
+        print(f"[bake] UV gutter padding skipped ({e}); seams may show")
+        return tex
 
 
 def _silhouette_bbox(normal_img, size):

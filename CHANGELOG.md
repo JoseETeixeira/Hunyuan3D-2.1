@@ -25,6 +25,14 @@
   `_composite_paint_over_base` helper: only the painted texels change, every other texel stays
   pixel-exact (no global resize, no half-resolution downsample). Output resolution is unchanged; only the
   cumulative degradation is gone. `_force_matte` keeps only the diffuse map, so MR/normal are unaffected.
+- **Hand-paint / reface bakes no longer leave dark UV-seam "vertex lines".** Keeping the atlas sharp (above)
+  exposed a latent artifact: the thin gutter texels between UV islands had too small a margin, so the
+  renderer's bilinear/mipmap sampling bled them in as dark lines tracing the triangulation. The old
+  whole-atlas resample had been widening that margin incidentally. `_composite_paint_over_base` now re-pads
+  the gutters with the renderer's own `uv_inpaint` (the same edge-padding the full base bake uses) via
+  `_dilate_uv_gutters`: it fills ONLY the gutter texels (UV-coverage from `render.texture_indices`) and
+  re-asserts island texels afterward so painted/untouched pixels stay bit-exact. Best-effort — if the
+  inpaint fails the composite is exported unchanged.
 - **Custom hand-paint ("Paint this angle"): the backdrop now matches the live 3D view exactly.** The
   capture sent only the orbit angle (`elev`/`azim`), but the backend rendered (and baked) with a fixed
   **orthographic** camera (`ortho_scale=1.2`, fixed distance, origin pivot) while `model-viewer` is
