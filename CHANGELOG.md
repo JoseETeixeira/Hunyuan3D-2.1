@@ -16,6 +16,17 @@
   changed.
 
 ### Fixed
+- **Hand-paint "AI fix" can no longer misplace elements — it only recolours now.** The fix sends the
+  rendered face to a generative model (Gemini / gpt-image); even with a prompt that forbids it, the
+  model regenerates pixels and drifts (shifts, redraws or reframes elements). Prompt text can't hard-lock
+  geometry. New `image_edit.recolor_preserve_structure` rebuilds the result in CIELAB: lightness **L**
+  (every element's position, edges, shapes and detail) is taken from the original render, and only the
+  colour channels **a/b** come from the AI output — edge-aware aligned to the render with a guided filter
+  so colours snap to the original's edges instead of bleeding. `_gpu_handpaint_ai` (`webapp/studio.py`)
+  applies it to the AI result before baking, so AI fix can recolour but never reposition. Trade-off: it
+  no longer repairs *structural* artefacts (e.g. luminance seams), by design. Toggle off with
+  `HANDPAINT_AI_RECOLOR_ONLY=0` for the raw generative output. Files: `webapp/image_edit.py`,
+  `webapp/studio.py`.
 - **Studio bakes now embed the diffuse texture losslessly (PNG), not JPEG — the real cause of the
   per-bake quality loss and blocky "artifacts".** `MeshRender.save_mesh` writes the diffuse map through
   `mesh_utils._save_texture_map`, which hardcodes `.jpg` (`cv2.imwrite`, ~q95). Every studio bake reloads

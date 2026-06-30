@@ -67,6 +67,49 @@ HANDPAINT_CUSTOM_REF_RULE = (
 )
 
 
+def _guided_filter(guide, src, radius, eps):
+    """He et al. guided filter for one channel (float [0,1]), built from box filters so it needs no
+    opencv-contrib. Smooths `src` while snapping its transitions to `guide`'s edges."""
+    import cv2
+
+    r = (radius, radius)
+    mean_g = cv2.boxFilter(guide, -1, r)
+    mean_s = cv2.boxFilter(src, -1, r)
+    cov_gs = cv2.boxFilter(guide * src, -1, r) - mean_g * mean_s
+    var_g = cv2.boxFilter(guide * guide, -1, r) - mean_g * mean_g
+    a = cov_gs / (var_g + eps)
+    b = mean_s - a * mean_g
+    return cv2.boxFilter(a, -1, r) * guide + cv2.boxFilter(b, -1, r)
+
+
+def recolor_preserve_structure(structure, color, chroma_radius=24, chroma_eps=1e-3):
+    """Recolour `structure` with `color`'s hues while keeping ALL of `structure`'s geometry.
+
+    A generative edit (Gemini / gpt-image) regenerates pixels and drifts — elements shift, redraw or
+    reframe even when the prompt forbids it. This reconstructs the result in CIELAB so its LIGHTNESS L
+    (and therefore every element's position, edges, shapes and fine detail) comes from `structure` (the
+    original render), and only the colour channels a/b come from `color` (the AI output). The model can
+    thus only change colours — it cannot move or redraw anything. The a/b channels are edge-aware
+    aligned to `structure` with a guided filter (guide = structure L) so colour transitions snap back to
+    the original's edges, suppressing bleed from the AI's spatial drift.
+    """
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    s = np.asarray(structure.convert("RGB"))
+    c = np.asarray(color.convert("RGB").resize(structure.size))
+    s_lab = cv2.cvtColor(s, cv2.COLOR_RGB2LAB).astype(np.float32)
+    c_lab = cv2.cvtColor(c, cv2.COLOR_RGB2LAB).astype(np.float32)
+
+    guide = s_lab[..., 0] / 255.0  # structure lightness as the edge guide
+    out = s_lab.copy()             # L stays from `structure` -> geometry is locked
+    for ch in (1, 2):              # a, b colour from the AI output, realigned to the structure's edges
+        out[..., ch] = np.clip(_guided_filter(guide, c_lab[..., ch] / 255.0, chroma_radius, chroma_eps) * 255.0, 0, 255)
+    rgb = cv2.cvtColor(out.astype(np.uint8), cv2.COLOR_LAB2RGB)
+    return Image.fromarray(rgb)
+
+
 def _png_buf(img, name, size, mode="RGB"):
     b = io.BytesIO()
     img.convert(mode).resize(size).save(b, format="PNG")

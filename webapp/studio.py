@@ -1029,7 +1029,7 @@ def _gpu_handpaint_ai(sjid: str, mid: str, view: str, image_path: str, edit,
     supplied (elev, azim) and touches no face slot."""
     from webapp import server
     from webapp.image_edit import (CARTOON_STYLE, CONSISTENCY_RULE, HANDPAINT_CUSTOM_REF_RULE,
-                                   HANDPAINT_FIX_PROMPT, edit_image)
+                                   HANDPAINT_FIX_PROMPT, edit_image, recolor_preserve_structure)
     if not _textured_glb(mid).exists():
         raise RuntimeError("model has no textured mesh")
     if not (image_path and os.path.exists(image_path)):
@@ -1068,6 +1068,12 @@ def _gpu_handpaint_ai(sjid: str, mid: str, view: str, image_path: str, edit,
         prompt += f" Also apply this specific touch-up while keeping everything else: {edit.strip()}."
     # prefer="gemini": keeps the input's exact proportions/layout so the bake stays aligned.
     fixed = edit_image(images, prompt, size=ai_size, prefer="gemini").convert("RGB")
+    # Hard structure lock: a generative edit still drifts (moves/redraws elements) despite the prompt.
+    # Rebuild the result with the CAPTURED render's lightness (so every element keeps its exact
+    # position/edges) and only the AI's colour — the fix can recolour but never reposition. Toggle off
+    # with HANDPAINT_AI_RECOLOR_ONLY=0 to get the raw generative output back.
+    if os.environ.get("HANDPAINT_AI_RECOLOR_ONLY", "1") != "0":
+        fixed = recolor_preserve_structure(captured, fixed)
 
     set_job(sjid, status="processing", progress=70)
     worker = server._ensure_model()
