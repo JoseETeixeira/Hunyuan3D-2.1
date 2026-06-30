@@ -1055,11 +1055,15 @@ def _gpu_handpaint_ai(sjid: str, mid: str, view: str, image_path: str, edit,
     has_ref = bool(ref and os.path.exists(ref))
     if has_ref:
         images.append(_contain(Image.open(ref).convert("RGB"), ai_size))
-    prompt = f"{HANDPAINT_FIX_PROMPT} {CONSISTENCY_RULE} {CARTOON_STYLE}"
     # The custom reference is a DIFFERENT-angle face, so pin Image 1 as the source of truth — otherwise
-    # Gemini drifts toward the reference's viewpoint at angles far from any canonical face.
+    # Gemini drifts toward the reference's viewpoint at angles far from any canonical face. Lead with the
+    # geometry-lock rule and DROP CONSISTENCY_RULE here: that rule frames both images as the same view
+    # ("only the camera differs"), which on a different-angle reference pushes Gemini to reconcile shapes
+    # and worsens the drift. CONSISTENCY_RULE stays for canonical views, where the reference IS this view.
     if view == "custom" and has_ref:
-        prompt += f" {HANDPAINT_CUSTOM_REF_RULE}"
+        prompt = f"{HANDPAINT_CUSTOM_REF_RULE} {HANDPAINT_FIX_PROMPT} {CARTOON_STYLE}"
+    else:
+        prompt = f"{HANDPAINT_FIX_PROMPT} {CONSISTENCY_RULE} {CARTOON_STYLE}"
     if edit and edit.strip():
         prompt += f" Also apply this specific touch-up while keeping everything else: {edit.strip()}."
     # prefer="gemini": keeps the input's exact proportions/layout so the bake stays aligned.

@@ -81,7 +81,10 @@ def _openai_edit(images, prompt, size, mask=None):
 
     client = OpenAI()
     model = os.environ.get("OPENAI_IMAGE_MODEL", "gpt-image-2")
-    bufs = [_png_buf(im, f"img{i}.png", size) for i, im in enumerate(images)]
+    # 1-indexed filenames so they line up with prompts that call the base "Image 1" and refs
+    # "Image 2 and onward". gpt-image binds mainly by array order, but matching the wording is a
+    # cheap reinforcement of which image is the geometry authority.
+    bufs = [_png_buf(im, f"image-{i + 1}.png", size) for i, im in enumerate(images)]
     kw = {}
     if mask is not None:
         # RGBA mask: transparent (alpha 0) = region gpt may paint; opaque = keep image[0].
@@ -99,7 +102,13 @@ def _gemini_edit(images, prompt, size):
     # Nano Banana Pro (latest, best quality). Override with GEMINI_IMAGE_MODEL, e.g.
     # gemini-3.1-flash-image (faster/cheaper) or gemini-2.5-flash-image (original).
     model = os.environ.get("GEMINI_IMAGE_MODEL", "gemini-3-pro-image")
-    contents = [prompt] + [im.convert("RGB").resize(size) for im in images]
+    # Interleave "Image N:" labels so the prompt's "Image 1" / "Image 2" references bind to the
+    # actual images. Without this the model only sees raw images in order and guesses which is the
+    # authority — at off-canonical angles it grabs the cleaner reference and drifts off Image 1.
+    contents = [prompt]
+    for i, im in enumerate(images, 1):
+        contents.append(f"Image {i}:")
+        contents.append(im.convert("RGB").resize(size))
     resp = client.models.generate_content(model=model, contents=contents)
     for cand in (getattr(resp, "candidates", None) or []):
         for part in (getattr(getattr(cand, "content", None), "parts", None) or []):
