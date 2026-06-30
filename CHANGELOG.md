@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### Fixed
+- **Texture bake: killed the wavy "shadow gradient" fan on unpainted walls.** Large empty UV islands
+  (a plain wall no view painted above the cosine gate) were filled by `cv2.INPAINT_NS`, whose harmonic
+  (Laplace) solve propagates the island's boundary colours inward as smooth iso-contours — a wavy
+  shadow-like gradient across the flat wall. `MeshRender.uv_inpaint` now flat-fills big holes from the
+  nearest known texel (Voronoi, via `distanceTransformWithLabels`) before the NS pass, so the wall
+  comes out uniform and NS only blends the thin residual seam. Thin gutters/scratches keep the exact
+  original NS path (byte-identical). Env-gated: `UV_INPAINT_FLATFILL=1` (default on),
+  `UV_INPAINT_FLATFILL_MINPX` (default 4096) — set `UV_INPAINT_FLATFILL=0` to restore old behaviour.
+  - New dep-light helper `hy3dpaint/DifferentiableRenderer/uv_inpaint_fill.py` (numpy + cv2 only) so
+    the fill is unit-testable on CPU without the GPU renderer.
+  - Test: `hy3dpaint/DifferentiableRenderer/test_uv_inpaint_fill.py`.
+  - Existing textured GLBs do not self-heal — re-run the base texture bake (or reface the wall) to
+    pick up the fix.
+
 ### Removed
 - **Dropped the unused MV-Adapter / SDXL model fetch and its dead code.** The texture pipeline only
   runs `hyface` + `reface` (see `_run_texture` in `webapp/server.py`); the MV-Adapter SDXL mode was

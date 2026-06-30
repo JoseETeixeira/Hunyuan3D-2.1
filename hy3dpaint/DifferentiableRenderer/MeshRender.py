@@ -12,6 +12,7 @@
 # fine-tuning enabling code and other elements of the foregoing made publicly available
 # by Tencent in accordance with TENCENT HUNYUAN COMMUNITY LICENSE AGREEMENT.
 
+import os
 import cv2
 import torch
 import trimesh
@@ -37,6 +38,11 @@ try:
     from .mesh_inpaint_processor import meshVerticeInpaint  # , meshVerticeColor
 except:
     print("InPaint Function CAN NOT BE Imported!!!")
+
+try:
+    from .uv_inpaint_fill import flat_fill_large_holes as _flat_fill_large_holes
+except Exception:  # support running from inside the package dir
+    from uv_inpaint_fill import flat_fill_large_holes as _flat_fill_large_holes
 
 
 class RenderMode(Enum):
@@ -1408,7 +1414,18 @@ class MeshRender:
             texture_np, mask = meshVerticeInpaint(texture_np, mask, vtx_pos, vtx_uv, pos_idx, uv_idx)
 
         if method == "NS":
-            texture_np = cv2.inpaint((texture_np * 255).astype(np.uint8), 255 - mask, 3, cv2.INPAINT_NS)
+            src = (texture_np * 255).astype(np.uint8)
+            hole = (255 - mask).astype(np.uint8)  # 255 where inpaint, 0 where keep
+            # cv2.INPAINT_NS solves a harmonic (Laplace) fill: over a thin gutter it is invisible,
+            # but over a LARGE empty UV island (e.g. a plain wall no view painted) it propagates the
+            # boundary colours inward as smooth iso-contours -> a wavy "shadow gradient" fan. Flat-fill
+            # big holes from the nearest known texel first (uniform fill, no fan), then let NS blend
+            # only the thin residual border. Small holes keep the exact original NS path. Env-gated.
+            flatfill = os.environ.get("UV_INPAINT_FLATFILL", "1").lower() not in ("0", "false", "no")
+            min_px = int(os.environ.get("UV_INPAINT_FLATFILL_MINPX", "4096"))
+            if flatfill and cv2.countNonZero(hole) > min_px:
+                src, hole = _flat_fill_large_holes(src, mask, hole, min_px)
+            texture_np = cv2.inpaint(src, hole, 3, cv2.INPAINT_NS)
             assert return_float == False
 
         return texture_np
