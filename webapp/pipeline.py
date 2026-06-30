@@ -44,15 +44,20 @@ def _convert_obj_to_glb(obj_path: str, glb_path: str) -> bool:
     return create_glb_with_pbr_materials(obj_path, textures, glb_path)
 
 
-def _force_matte(mesh):
-    """Render a textured mesh as flat matte color (no metallic/specular chrome)."""
+def _force_matte(mesh, override_texture=None):
+    """Render a textured mesh as flat matte color (no metallic/specular chrome).
+
+    override_texture (PIL.Image): when given, use this as the base-color map instead of the one
+    embedded in the loaded mesh. The composite paths pass the pixel-exact in-memory texture so the
+    exported GLB carries it losslessly, instead of the JPEG `save_mesh` wrote to the intermediate OBJ.
+    """
     import trimesh
     from trimesh.visual.material import PBRMaterial
 
     def apply(g):
         mat = getattr(getattr(g, "visual", None), "material", None)
-        img = None
-        if mat is not None:
+        img = override_texture
+        if img is None and mat is not None:
             img = getattr(mat, "image", None) or getattr(mat, "baseColorTexture", None)
         if img is not None:
             g.visual.material = PBRMaterial(baseColorTexture=img, metallicFactor=0.0, roughnessFactor=1.0)
@@ -98,10 +103,45 @@ def _composite_paint_over_base(render, base_img, new_tex, fg_uv, obj_path, glb_p
     # force_set -> store as-is (no resize); downsample=False -> keep the native size on export.
     render.set_texture(out, force_set=True)
     render.save_mesh(obj_path, downsample=False)
+    # Export with the pixel-exact in-memory atlas embedded losslessly (see _export_matte_glb): the
+    # JPEG that save_mesh wrote to the OBJ is never reloaded, so repeated bakes can't compound it.
+    return _export_matte_glb(obj_path, glb_path, out)
+
+
+def _export_matte_glb(obj_path, glb_path, texture, downsample=False):
+    """Export a matte GLB from a saved OBJ (geometry + reconciled UVs) with `texture` (float [0,1]
+    HxWx3) embedded LOSSLESSLY as PNG.
+
+    `save_mesh` writes the diffuse map as JPEG (mesh_utils._save_texture_map hardcodes `.jpg`, ~q95).
+    Every studio bake reloads its own GLB and re-bakes, so a JPEG diffuse compounds blocky artifacts
+    and softening over the WHOLE atlas on each edit. Passing the in-memory texture straight to the GLB
+    avoids the OBJ's JPEG entirely. `downsample=True` halves the texture the same way
+    `save_mesh(downsample=True)` did, so resolutions are unchanged — only the lossy encode is gone.
+    """
+    import cv2
+    import trimesh
+    if downsample:
+        texture = cv2.resize(texture, (texture.shape[1] // 2, texture.shape[0] // 2))
     mesh_out = trimesh.load(obj_path)
-    _force_matte(mesh_out)
+    _force_matte(mesh_out, override_texture=_lossless_png(texture))
     mesh_out.export(glb_path)
     return glb_path
+
+
+def _lossless_png(tex):
+    """PIL image (format='PNG') from a float [0,1] HxWx3 texture, so trimesh's GLB exporter embeds it
+    losslessly. A from-array image has format=None (which the exporter may JPEG-encode); round-tripping
+    through a PNG buffer pins the format to PNG."""
+    import io
+    import numpy as np
+    from PIL import Image
+    img = Image.fromarray(np.clip(tex * 255.0, 0, 255).astype(np.uint8), "RGB")
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    img = Image.open(buf)
+    img.load()  # force decode so the backing buffer can be released
+    return img
 
 
 def _dilate_uv_gutters(render, tex):
@@ -117,13 +157,17 @@ def _dilate_uv_gutters(render, tex):
     import cv2
     import numpy as np
     try:
-        cov = (render.texture_indices >= 0).detach().cpu().numpy().astype(np.uint8) * 255  # 255=island
+        cov = (render.texture_indices >= 0).detach().cpu().numpy().astype(np.uint8)  # 1=island, 0=gutter
         h, w = tex.shape[:2]
         if cov.shape != (h, w):                       # texture_indices is at the renderer's texture_size
             cov = cv2.resize(cov, (w, h), interpolation=cv2.INTER_NEAREST)
-        filled = render.uv_inpaint(tex, cov).astype(np.float32) / 255.0   # uint8 -> [0, 1]
-        keep = cov > 0
-        filled[keep] = tex[keep]                      # island texels stay pixel-exact; only gutters padded
+        filled = render.uv_inpaint(tex, cov * 255).astype(np.float32) / 255.0   # uint8 -> [0, 1]
+        # Re-assert island texels so the inpaint can ONLY add gutter margin. Dilate the keep region by
+        # 1px first: the coverage mask is resized from the renderer's texture_size and can be off by a
+        # texel at island edges, so the dilation guarantees a real island pixel is never overwritten by
+        # an inpainted (smeared) value — which would itself read as an edge artifact.
+        keep = cv2.dilate(cov, np.ones((3, 3), np.uint8), iterations=1) > 0
+        filled[keep] = tex[keep]                      # island texels stay pixel-exact; only deep gutters padded
         return filled
     except Exception as e:  # noqa: BLE001
         print(f"[bake] UV gutter padding skipped ({e}); seams may show")
@@ -526,12 +570,10 @@ class TextureWorker:
         obj_path = os.path.join(self.output_dir, f"{uid}_proj.obj")
         pp.render.save_mesh(obj_path, downsample=True)
 
-        # Projection is albedo-only (OBJ + MTL map_Kd). Convert straight to GLB with
-        # trimesh; create_glb_with_pbr_materials would require metallic/roughness maps.
+        # Projection is albedo-only (OBJ + MTL map_Kd). Export straight to GLB with the in-memory
+        # texture embedded losslessly (skip the OBJ's JPEG diffuse so re-bakes don't compound it).
         textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
-        mesh_out = trimesh.load(obj_path)
-        _force_matte(mesh_out)  # flat colors, not chrome
-        mesh_out.export(textured_path)
+        _export_matte_glb(obj_path, textured_path, pp.render.get_texture(), downsample=True)
 
         if self.low_vram_mode:
             torch.cuda.empty_cache()
@@ -583,9 +625,7 @@ class TextureWorker:
         obj_path = os.path.join(self.output_dir, f"{uid}_proj.obj")
         pp.render.save_mesh(obj_path, downsample=True)
         textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
-        mesh_out = trimesh.load(obj_path)
-        _force_matte(mesh_out)
-        mesh_out.export(textured_path)
+        _export_matte_glb(obj_path, textured_path, pp.render.get_texture(), downsample=True)
         if self.low_vram_mode:
             torch.cuda.empty_cache()
         return textured_path
@@ -668,11 +708,10 @@ class TextureWorker:
         obj_path = os.path.join(self.output_dir, f"{uid}_hyface.obj")
         pp.render.save_mesh(obj_path, downsample=True)
 
-        # Albedo-only matte (OBJ + map_Kd) straight to GLB, like project_texture.
+        # Albedo-only matte (OBJ + map_Kd) straight to GLB, like project_texture — diffuse embedded
+        # losslessly so the hyface base doesn't start as JPEG and degrade further on each re-bake.
         textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
-        mesh_out = trimesh.load(obj_path)
-        _force_matte(mesh_out)
-        mesh_out.export(textured_path)
+        _export_matte_glb(obj_path, textured_path, pp.render.get_texture(), downsample=True)
         if self.low_vram_mode:
             torch.cuda.empty_cache()
         return textured_path

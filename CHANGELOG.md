@@ -16,6 +16,18 @@
   changed.
 
 ### Fixed
+- **Studio bakes now embed the diffuse texture losslessly (PNG), not JPEG — the real cause of the
+  per-bake quality loss and blocky "artifacts".** `MeshRender.save_mesh` writes the diffuse map through
+  `mesh_utils._save_texture_map`, which hardcodes `.jpg` (`cv2.imwrite`, ~q95). Every studio bake reloads
+  its own `_textured.glb` and re-bakes, so the whole atlas was re-encoded as JPEG on each edit —
+  compounding ringing/blockiness and softening even on faces that weren't touched. New `_export_matte_glb`
+  helper exports the GLB from the saved OBJ geometry but swaps in the pixel-exact in-memory texture as a
+  lossless PNG (`_force_matte` gained an `override_texture` arg; `_lossless_png` pins the PIL format to
+  PNG so trimesh embeds it losslessly). Routed through it: `paint_overlay` + `reface` (composite, native
+  res) and the base bakes `hyface` / projection (`webapp/pipeline.py`), keeping each path's existing
+  output resolution (`downsample=True` halves the override to match). Trade-off: GLBs are larger (PNG vs
+  JPEG); quality is the point. Note: existing models still carry whatever JPEG damage they were baked
+  with — re-generate the base to get a clean lossless start.
 - **Hand-paint / reface bakes no longer soften the rest of the texture.** Every composite bake reloaded
   the stored texture and `set_texture` resized it up to the renderer's `texture_size` (e.g. 2048→4096),
   then `save_mesh(downsample=True)` halved the whole atlas again on export (4096→2048). That round-trip
