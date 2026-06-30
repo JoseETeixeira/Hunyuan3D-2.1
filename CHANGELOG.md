@@ -2,7 +2,29 @@
 
 ## Unreleased
 
+### Removed
+- **Dropped the unused MV-Adapter / SDXL model fetch and its dead code.** The texture pipeline only
+  runs `hyface` + `reface` (see `_run_texture` in `webapp/server.py`); the MV-Adapter SDXL mode was
+  removed long ago but its model fetch and runner were still in the tree. Deleted
+  `webapp/setup_mvadapter.sh` (fetched SDXL base ~6.9G, the ig2mv adapter ~3.6G, `RealESRGAN_x2plus`,
+  `big-lama`, and BiRefNet) plus `webapp/mvadapter_runner.py`, `webapp/mvadapter_texture.py`, and
+  `webapp/sdxl_geomatch.py`. Removed the now-orphaned `_unload_worker` helper (only freed VRAM for the
+  MV-Adapter subprocess) and the vestigial `mv_viewset` form param / job field from `/generate`,
+  `/api/jobs/{id}/texture`, `/api/retexture` (`webapp/server.py`) and the studio base job
+  (`webapp/studio.py`). Pruned the `mvadapter` volume and `MVADAPTER_*` env from `docker-compose.yml`.
+  Kept the still-used `RealESRGAN_x4plus` (Hunyuan paint super-res) and UniRig (rigging). No live path
+  changed.
+
 ### Fixed
+- **Hand-paint / reface bakes no longer soften the rest of the texture.** Every composite bake reloaded
+  the stored texture and `set_texture` resized it up to the renderer's `texture_size` (e.g. 2048→4096),
+  then `save_mesh(downsample=True)` halved the whole atlas again on export (4096→2048). That round-trip
+  ran over EVERY texel — including the ones not being edited — so each hand-paint or reface lost a little
+  sharpness/detail across the entire model. `paint_overlay` and `reface` (`webapp/pipeline.py`) now
+  composite the freshly-baked texels over the existing texture at **its native resolution** via the new
+  `_composite_paint_over_base` helper: only the painted texels change, every other texel stays
+  pixel-exact (no global resize, no half-resolution downsample). Output resolution is unchanged; only the
+  cumulative degradation is gone. `_force_matte` keeps only the diffuse map, so MR/normal are unaffected.
 - **Custom hand-paint ("Paint this angle"): the backdrop now matches the live 3D view exactly.** The
   capture sent only the orbit angle (`elev`/`azim`), but the backend rendered (and baked) with a fixed
   **orthographic** camera (`ortho_scale=1.2`, fixed distance, origin pivot) while `model-viewer` is

@@ -25,8 +25,6 @@ services:
       - ./webapp:/workspace/Hunyuan3D-2.1/webapp
       # Persist generated models on the host (subpath of the webapp mount above).
       - ./webapp/outputs:/workspace/Hunyuan3D-2.1/webapp/outputs
-      # Persist the isolated MV-Adapter checkout + conda env across recreations.
-      - mvadapter:/opt/mvadapter
       # Persist the isolated UniRig checkout + conda env (step-3 AI rigging) across recreations.
       - unirig:/opt/unirig
     environment:
@@ -38,11 +36,6 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY}  # gpt-image-2 texturing + projection AI-fill; set in .env or your shell.
       - HF_TOKEN=${HF_TOKEN:-}            # authenticated HF downloads (faster, no rate-limit throttle)
       - GEMINI_API_KEY=${GEMINI_API_KEY:-}  # Gemini "nano banana" image-edit fallback for gpt-image-2
-      # MV-Adapter (isolated env on the mvadapter volume). SDXL base (SD2.1 is gated on
-      # HF); cpu-offload + 768/uv2048 keep it within 16GB. Tunables: MVADAPTER_OFFLOAD,
-      # MVADAPTER_HEIGHT, MVADAPTER_UV_SIZE.
-      - MVADAPTER_DIR=/opt/mvadapter/MV-Adapter
-      - MVADAPTER_CONDA_PREFIX=/opt/mvadapter/env
       # UniRig (step-3 AI rigging) — isolated env on the unirig volume. Set up once with
       # `docker compose exec hunyuan3d-studio bash webapp/setup_unirig.sh`. Weights pull from
       # HF VAST-AI/UniRig on first rig job.
@@ -66,5 +59,4 @@ services:
 volumes:
   hf-cache:
   hy3dgen-cache:
-  mvadapter:
   unirig:

@@ -64,6 +64,41 @@ def _force_matte(mesh):
         apply(mesh)
 
 
+def _composite_paint_over_base(render, base_img, new_tex, fg_uv, obj_path, glb_path):
+    """Bake the freshly-painted texels over the existing texture AT ITS NATIVE RESOLUTION.
+
+    The renderer bakes into a `texture_size`-sized buffer (e.g. 4096), and the old path both resized
+    the loaded texture up to that size AND halved it again on `save_mesh(downsample=True)`. That
+    round-tripped EVERY texel (resize -> downsample) on each hand-paint / reface bake, so regions that
+    weren't even edited lost sharpness a little more each time. Here the stored texture is kept
+    pixel-exact and ONLY the painted texels are overwritten, so untouched areas never degrade. Only
+    the painted result + its mask are resampled to the base's resolution (that region is repainted
+    anyway). `_force_matte` keeps only the diffuse map, so MR/normal resolution is irrelevant here.
+    """
+    import cv2
+    import numpy as np
+    import trimesh
+
+    base = np.asarray(base_img.convert("RGB"), dtype=np.float32) / 255.0   # (H, W, 3) in [0, 1]
+    h, w = base.shape[:2]
+    painted = new_tex[..., :3].clamp(0, 1).detach().cpu().numpy()          # (T, T, 3)
+    mask = fg_uv.detach().cpu().numpy().astype(bool)                       # (T, T)
+    if painted.shape[:2] != (h, w):
+        interp = cv2.INTER_AREA if (h * w) < (painted.shape[0] * painted.shape[1]) else cv2.INTER_LINEAR
+        painted = cv2.resize(painted, (w, h), interpolation=interp)
+        mask = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST) > 0
+
+    out = base.copy()
+    out[mask] = painted[mask]
+    # force_set -> store as-is (no resize); downsample=False -> keep the native size on export.
+    render.set_texture(out, force_set=True)
+    render.save_mesh(obj_path, downsample=False)
+    mesh_out = trimesh.load(obj_path)
+    _force_matte(mesh_out)
+    mesh_out.export(glb_path)
+    return glb_path
+
+
 def _silhouette_bbox(normal_img, size):
     """Bounding box of the mesh silhouette in a rendered normal map (corner = bg)."""
     import numpy as np
@@ -679,15 +714,13 @@ class TextureWorker:
         rs = pp.config.render_size
 
         # 1) Load the textured mesh PRESERVING its UVs (no mesh_uv_wrap — re-unwrapping would
-        #    discard the existing texture's UV layout). The renderer's load_mesh reads UVs but NOT
-        #    the texture image, so seed the existing texture explicitly as the base to composite over.
+        #    discard the existing texture's UV layout). load_mesh reads UVs but NOT the texture image,
+        #    so the existing texture (`tex_img`) is composited over at its native resolution below.
         mesh = trimesh.load(textured_glb_path, force="mesh")
         render.load_mesh(mesh=mesh)
         tex_img = _extract_base_texture(mesh, textured_glb_path)
         if tex_img is None:
             raise RuntimeError("reface: the source GLB has no readable base-color texture")
-        render.set_texture(tex_img.convert("RGB"))  # force_set=False -> resized to texture_size, [0,1]
-        base = torch.from_numpy(render.get_texture()).float().to(render.device)  # (Ht,Wt,3) in [0,1]
 
         # 2) Screen-space depth at the face camera. POSITION encodes each vertex as
         #    (0.5 - vtx_pos/scale_factor) in [0,1] — NOT raw world — so recover the world
@@ -764,17 +797,11 @@ class TextureWorker:
         except Exception as _e:  # noqa: BLE001
             print(f"[reface] diag failed: {_e}")
 
-        # 5) Composite foreground texels over the existing base; everything else untouched.
-        out = base.clone()
-        out[fg_uv] = new_tex[..., :3][fg_uv]
-        render.set_texture(out, force_set=True)
-
+        # 5) Composite foreground texels over the existing base at its native resolution; every other
+        #    texel stays pixel-exact (no whole-atlas resample that softened past bakes).
         obj_path = os.path.join(self.output_dir, f"{uid}_reface.obj")
-        render.save_mesh(obj_path, downsample=True)
         textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
-        mesh_out = trimesh.load(obj_path)
-        _force_matte(mesh_out)
-        mesh_out.export(textured_path)
+        _composite_paint_over_base(render, tex_img, new_tex, fg_uv, obj_path, textured_path)
         if self.low_vram_mode:
             torch.cuda.empty_cache()
         return textured_path
@@ -804,8 +831,6 @@ class TextureWorker:
         tex_img = _extract_base_texture(mesh, textured_glb_path)
         if tex_img is None:
             raise RuntimeError("paint_overlay: the source GLB has no readable base-color texture")
-        render.set_texture(tex_img.convert("RGB"))
-        base = torch.from_numpy(render.get_texture()).float().to(render.device)
 
         # Match the render's resolution/aspect so the painted overlay back-projects pixel-aligned. For
         # a perspective free-camera the overlay is the viewport-aspect backdrop the user drew on; for
@@ -846,16 +871,9 @@ class TextureWorker:
             render.bake_angle_thres = _saved_thres
             render.camera_proj_mat = _saved_proj
         fg_uv = (cos_map[..., 0] > 1e-4) & (new_tex[..., 3] > 0.5)
-        out = base.clone()
-        out[fg_uv] = new_tex[..., :3][fg_uv]
-        render.set_texture(out, force_set=True)
-
         obj_path = os.path.join(self.output_dir, f"{uid}_reface.obj")
-        render.save_mesh(obj_path, downsample=True)
         textured_path = os.path.join(self.output_dir, f"{uid}_textured.glb")
-        mesh_out = trimesh.load(obj_path)
-        _force_matte(mesh_out)
-        mesh_out.export(textured_path)
+        _composite_paint_over_base(render, tex_img, new_tex, fg_uv, obj_path, textured_path)
         if self.low_vram_mode:
             torch.cuda.empty_cache()
         return textured_path

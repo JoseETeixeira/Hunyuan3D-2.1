@@ -283,30 +283,6 @@ def _ensure_model():
     return WORKER["obj"]
 
 
-def _unload_worker():
-    """Free the Hunyuan shape+paint models from RAM/VRAM so a separate-process job
-    (MV-Adapter's SDXL) has headroom. Models reload lazily on the next Hunyuan job."""
-    obj = WORKER.get("obj")
-    if obj is None:
-        return
-    try:
-        obj.release()
-    except Exception:  # noqa: BLE001
-        pass
-    WORKER["obj"] = None
-    WORKER["ready"] = False
-    import gc
-
-    gc.collect()
-    try:
-        import torch
-
-        torch.cuda.empty_cache()
-    except Exception:  # noqa: BLE001
-        pass
-    print("[server] unloaded Hunyuan models to free memory")
-
-
 def _run_shape(job_id):
     job = JOBS[job_id]
     worker = _ensure_model()
@@ -810,9 +786,8 @@ async def _no_cache_ui(request, call_next):
 @app.get("/api/health")
 def health():
     return {
-        # Operational once the model has loaded at least once — an intentional unload
-        # (MV-Adapter frees the Hunyuan worker) lazy-reloads on the next job, so don't
-        # report it as "warming up".
+        # Operational once the model has loaded at least once; a lazy reload on the next
+        # job shouldn't be reported as "warming up".
         "model_ready": bool(WORKER["ready"] or WORKER["loaded_once"]),
         "model_error": WORKER["error"],
         "queue": WORK.qsize(),
@@ -840,7 +815,6 @@ async def generate(
     texture_mode: str = Form("hyface"),   # per-face AI paint (only hyface + reface remain)
     ai_fill_angles: str = Form(""),       # projection: comma-sep angles to synth from front via OpenAI
     gpt_angles: str = Form("front,back,left,right,top"),  # gptproject: comma-sep canonical angles to paint
-    mv_viewset: str = Form("canonical"),  # mvadapter/mvgpt: canonical | corners | tilted
     front: UploadFile = File(None),       # hyface: explicit front-face reference (else the main image)
     back: UploadFile = File(None),
     left: UploadFile = File(None),
@@ -851,7 +825,7 @@ async def generate(
     fr: UploadFile = File(None),
     bl: UploadFile = File(None),
     br: UploadFile = File(None),
-    reference: list[UploadFile] = File(None),  # gpt/mvgpt: optional style reference image(s)
+    reference: list[UploadFile] = File(None),  # gpt reface: optional style reference image(s)
     reference_side: list[str] = Form(None),    # per-reference side tag, parallel to `reference`
 ):
     if not images:
@@ -900,7 +874,6 @@ async def generate(
         "texture_mode": texture_mode,
         "ai_fill_angles": [a.strip() for a in ai_fill_angles.split(",") if a.strip()],
         "gpt_angles": [a.strip() for a in gpt_angles.split(",") if a.strip()],
-        "mv_viewset": mv_viewset,
         "reference_paths": reference_paths,
         "reference_sides": reference_sides,
         "num_images": len(source_paths),
@@ -932,7 +905,6 @@ async def request_texture(
     texture_mode: str = Form(None),
     ai_fill_angles: str = Form(None),
     gpt_angles: str = Form(None),
-    mv_viewset: str = Form(None),
     remove_background: bool = Form(None),
     front: UploadFile = File(None),       # hyface: explicit front-face reference (else the main image)
     reference: list[UploadFile] = File(None),
@@ -951,8 +923,6 @@ async def request_texture(
         job["ai_fill_angles"] = [a.strip() for a in ai_fill_angles.split(",") if a.strip()]
     if gpt_angles is not None:
         job["gpt_angles"] = [a.strip() for a in gpt_angles.split(",") if a.strip()]
-    if mv_viewset:
-        job["mv_viewset"] = mv_viewset
     if remove_background is not None:
         job["params"]["remove_background"] = bool(remove_background)
     # Explicit front-face reference (hyface Front slot) overrides the stored front.
@@ -1066,7 +1036,6 @@ async def retexture(
     texture_mode: str = Form("hyface"),
     ai_fill_angles: str = Form(""),
     gpt_angles: str = Form("front,back,left,right,top"),
-    mv_viewset: str = Form("canonical"),
     remove_background: bool = Form(True),
     face_count: int = Form(40000),
     views: int = Form(7),
@@ -1126,7 +1095,6 @@ async def retexture(
         "auto_texture": False, "texture_mode": texture_mode,
         "ai_fill_angles": [a.strip() for a in ai_fill_angles.split(",") if a.strip()],
         "gpt_angles": [a.strip() for a in gpt_angles.split(",") if a.strip()],
-        "mv_viewset": mv_viewset,
         "reference_paths": reference_paths,
         "reference_sides": reference_sides,
         "num_images": len(source_paths), "source_paths": source_paths, "view_paths": view_paths,

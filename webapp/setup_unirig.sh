@@ -7,8 +7,8 @@
 #   docker compose exec hunyuan3d bash webapp/setup_unirig.sh
 #   # or, by container name:  docker exec -it hunyuan3d-studio bash webapp/setup_unirig.sh
 #
-# Mirrors setup_mvadapter.sh: clones to a path on the persisted `unirig` volume and creates the env
-# by PREFIX so it survives container recreation and never shadows the baked-in hunyuan3d21 env.
+# Clones to a path on the persisted `unirig` volume and creates the env by PREFIX so it survives
+# container recreation and never shadows the baked-in hunyuan3d21 env.
 # Model weights pull lazily from HuggingFace (VAST-AI/UniRig) on the first rig job (cached in hf-cache).
 #
 # Wheel pins below target the container's CUDA 12.8 / torch 2.7 (RTX 50-series, sm_120). spconv,

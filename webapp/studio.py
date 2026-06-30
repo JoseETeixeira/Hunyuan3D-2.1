@@ -727,7 +727,7 @@ def _gpu_base(sjid: str, mid: str, cfg) -> None:
     server.JOBS[mid] = {
         "id": mid, "status": "processing_texture", "progress": 60, "message": "", "error": None,
         "shape_url": None, "textured_url": None, "auto_texture": False, "texture_mode": "hyface",
-        "ai_fill_angles": [], "gpt_angles": [], "mv_viewset": "canonical",
+        "ai_fill_angles": [], "gpt_angles": [],
         "reference_paths": [], "reference_sides": [], "num_images": 1,
         "source_paths": [src0], "view_paths": view_paths, "shape_path": shape_path,
         "processed_image_path": processed, "created_at": time.time(),
